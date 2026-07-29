@@ -13,12 +13,15 @@ is the book — no CSV/Excel upload. Historical prices are fetched and aligned t
 the benchmark's trading calendar, then a value-weighted portfolio return series
 is compared to the benchmark return series.
 
+``build_return_series`` can additionally value a SECOND unit vector over the
+same names off the same price panel (``alt_quantities``) — used to chart an
+equal-weight shadow of the curated book beside it.
+
 Author: @thebullishvalue
 """
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -403,9 +406,20 @@ def build_return_series(
     benchmark_ticker: str,
     benchmark_name: str,
     anchor_date: Optional[datetime] = None,
-) -> Tuple[pd.Series, pd.Series, Optional[pd.Series], str, list]:
+    alt_quantities: Optional[Dict[str, float]] = None,
+) -> Tuple[pd.Series, pd.Series, Optional[pd.Series], str, list, pd.Series, pd.Series]:
     """From a curated portfolio, produce
-    ``(port_value, port_returns, bench_returns, error, unpriced)``.
+    ``(port_value, port_returns, bench_returns, error, unpriced, alt_value,
+    bench_value)``.
+
+    ``bench_value`` is the benchmark PRICE series on the same trimmed calendar as
+    ``port_value``. Charts must normalize from it rather than from
+    ``(1 + bench_returns).cumprod()``: pct_change drops the first bar, so the
+    cumprod both starts one bar late AND rebases to day 1, silently discarding
+    the opening day's move. Measured on a 6-bar toy series, that reported a
+    benchmark at +7.84% when its true return over the window was +10.00% — and it
+    made the chart disagree with the Benchmark Comparison cards, which read from
+    ``bench_returns`` and were correct.
 
     ``portfolio`` must have ``symbol`` and ``units`` columns (the live Pragyam
     book). Returns an error string (non-empty) instead of raising on failure.
@@ -413,10 +427,19 @@ def build_return_series(
     ``unpriced`` lists held symbols (with non-zero units) that could not be
     priced/matched — the caller should surface these, since a dropped holding
     silently under-represents the book.
+
+    ``alt_quantities`` is an OPTIONAL second ``{symbol: units}`` vector over the
+    same names — used by the Analytics tab to chart an equal-weight shadow of
+    the same book alongside it. It is valued here rather than by a second call
+    so both series come off ONE price download and, more importantly, share the
+    identical trading-date index and leading-row trim: two independently built
+    series could start on different dates and would then be normalized from
+    different bases, making the comparison quietly wrong. ``alt_value`` is an
+    empty Series when ``alt_quantities`` is None.
     """
     _empty = pd.Series(dtype=float)
     if portfolio is None or portfolio.empty or "symbol" not in portfolio.columns or "units" not in portfolio.columns:
-        return _empty, _empty, None, "No curated portfolio.", []
+        return _empty, _empty, None, "No curated portfolio.", [], _empty, _empty
 
     symbols = [str(s) for s in portfolio["symbol"].tolist()]
     quantities = {str(s): float(u or 0) for s, u in zip(portfolio["symbol"], portfolio["units"])}
@@ -427,14 +450,14 @@ def build_return_series(
 
     port_prices, bench_prices = fetch_analysis_data(symbols, days_back, benchmark_ticker, benchmark_name)
     if port_prices.empty:
-        return _empty, _empty, None, "Unable to fetch historical data.", sorted(held)
+        return _empty, _empty, None, "Unable to fetch historical data.", sorted(held), _empty, _empty
 
     if anchor_date is not None:
         cut = pd.Timestamp(anchor_date)
         port_prices = port_prices[port_prices.index >= cut]
         bench_prices = bench_prices[bench_prices.index >= cut]
         if port_prices.empty:
-            return _empty, _empty, None, "No data from the anchor date.", sorted(held)
+            return _empty, _empty, None, "No data from the anchor date.", sorted(held), _empty, _empty
 
     # Which held symbols never got a price column at all (unmatched / delisted /
     # ticker-suffix mismatch)? Those are genuinely absent from the value series.
@@ -446,7 +469,13 @@ def build_return_series(
         if sym in quantities:
             port_value[sym] = port_prices[sym] * quantities[sym]
     if port_value.empty:
-        return _empty, _empty, None, "No priced holdings.", unpriced
+        return _empty, _empty, None, "No priced holdings.", unpriced, _empty, _empty
+
+    alt_value = pd.DataFrame(index=port_prices.index)
+    if alt_quantities:
+        for sym in port_prices.columns:
+            if sym in alt_quantities:
+                alt_value[sym] = port_prices[sym] * float(alt_quantities[sym])
 
     # Drop LEADING rows until every priced holding has a value on that date.
     # Otherwise `.sum(axis=1)` (which skips NaN) would treat a not-yet-available
@@ -459,17 +488,36 @@ def build_return_series(
             first_valid = fully_priced.idxmax()  # first True
             port_value = port_value.loc[first_valid:]
             bench_prices = bench_prices[bench_prices.index >= first_valid]
+            # Same trim for the alternate book — it holds the same names, so it
+            # must start on the same date to be normalized from the same base.
+            if not alt_value.empty:
+                alt_value = alt_value.loc[first_valid:]
 
     port_value["Portfolio"] = port_value.sum(axis=1)
     port_value = port_value["Portfolio"].dropna()
 
     port_returns = port_value.pct_change(fill_method=None).dropna()
 
-    bench_returns = None
-    if not bench_prices.empty and benchmark_name in bench_prices.columns:
-        bench_returns = bench_prices[benchmark_name].pct_change(fill_method=None).dropna()
+    if alt_value.empty:
+        alt_series = _empty
+    else:
+        alt_series = alt_value.sum(axis=1).dropna()
+        # Reindex onto the main series' dates so the two lines are plotted (and
+        # any excess return computed) over exactly the same window.
+        alt_series = alt_series.reindex(port_value.index).dropna()
 
-    return port_value, port_returns, bench_returns, "", unpriced
+    bench_returns = None
+    bench_value = _empty
+    if not bench_prices.empty and benchmark_name in bench_prices.columns:
+        bench_value = bench_prices[benchmark_name].dropna()
+        # Anchor the benchmark to the portfolio's own first date so both lines
+        # are normalized from the SAME bar. Without this the chart starts the
+        # benchmark one bar late and rebases it there.
+        if not port_value.empty:
+            bench_value = bench_value[bench_value.index >= port_value.index[0]]
+        bench_returns = bench_value.pct_change(fill_method=None).dropna()
+
+    return port_value, port_returns, bench_returns, "", unpriced, alt_series, bench_value
 
 
 __all__ = [

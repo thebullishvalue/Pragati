@@ -7,6 +7,418 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [11.0.0] - 2026-07-29
+
+### 🧹 Shipping polish
+
+- **Unreachable allocator code removed.** `nco.py` still carried the full Nested
+  Clustered Optimization path and an Equal Risk Contribution path, neither of
+  which any UI style could reach (`_NCO_STYLES` maps only to `HRP` and `EQUAL`).
+  Both branches and the three functions only they called — `nco_weights`,
+  `erc_weights`, `min_var_long_only` — are gone; `METHODS` is now
+  `("HRP", "EQUAL")` and the module is 571 → 456 lines. Both were measured
+  before removal: ERC achieves perfect risk balance (1.00x against HRP's
+  1.5–1.7x) but matched HRP on return and Sharpe to within noise in both
+  disjoint windows; NCO trailed HRP on return, Sharpe and drawdown in both.
+- **Stale Portfolio Style tooltip rewritten.** It still described Swing / SIP /
+  Nested Clustered and quoted the superseded nested-window figures
+  ("drawdown -11.4% to -7.7%, Sharpe 0.80 to 1.42"). It now describes the two
+  shipped styles and carries the corrected disjoint-window result: HRP gives up
+  ~1%/yr for roughly a 20% cut in volatility and drawdown.
+
+- **Analytics rebuilt for comprehension.** Four stacked six-card rows (24 cards)
+  became a **Head to Head** table with the three books side by side, so
+  comparison is a horizontal read instead of a scan across disconnected blocks
+  holding figures in memory. Best value per row is marked. Only genuinely
+  pairwise statistics (beta, alpha, correlation, tracking error, up/down
+  capture) remain as cards, in a **Relationship to Benchmark** block — they have
+  no meaning for a single book, which is why they cannot live in the table.
+- **Every metric formula verified** against direct computation on a constructed
+  series: beta, correlation, R², CAGR, tracking error, volatility, Sharpe,
+  Sortino, CAPM alpha, information ratio, up/down capture, max drawdown, Calmar
+  and VaR all match exactly. No arithmetic changes were needed.
+- **Uniform descriptor captions.** Every chart and table now carries an
+  explainer in the same voice, stating what the reader is looking at and how to
+  read it. Previously only three of six had one — the Risk Profile heatmap and
+  the regime history chart had none, and the performance chart lost its
+  descriptor whenever the equal-weight shadow was absent.
+- **Vertical rhythm normalised.** The rule is now one `_section_divider()` per
+  section boundary in every tab (dividers == headers − 1). Analytics was mixing
+  a divider for one boundary and a bare `section_gap()` for the next.
+- **Scrollbar palette corrected.** The holdings-table iframe used
+  `#8B7E6A` (slate-warm) while `ui/theme.css` uses `--ink-tertiary` (`#4B5563`),
+  so that one scrollbar sat visibly lighter than every other surface. Both
+  in-iframe tables now use the theme token, with a `#6B7280` hover.
+- **Dead code removed; lint is clean at zero.** Unused imports across seven
+  modules, unused locals, and a duplicate definition of
+  `VERSION`/`PRODUCT_NAME`/`COMPANY` in `app.py` that shadowed the `ui.theme`
+  import — two sources of truth for the version string, now one.
+- **Shipping hygiene.** `VERSION` → `v11.0.0`; `optuna` dropped from
+  dependencies (the calibration it served was removed in v11); `requirements.txt`
+  and `pyproject.toml` rewritten to describe the covariance system;
+  `.gitignore` added, excluding `__pycache__`, research `.pkl` artefacts and the
+  local `core/` version archives.
+
+### 🐛 Fixed — Analytics benchmark alignment & Portfolio table
+
+- **The benchmark line started a bar late and was rebased there.** The chart
+  built its benchmark series as `(1 + bench_returns).cumprod()`. `pct_change`
+  drops the first bar, so that series began one bar after the portfolio AND
+  normalized from day 1 instead of day 0 — silently discarding the opening day's
+  move. It also made the chart disagree with the Benchmark Comparison cards,
+  which read `bench_returns` directly and were correct.
+  `build_return_series` now returns `bench_value`, the benchmark PRICE series
+  trimmed to the portfolio's own first date, and the chart normalizes from it.
+  Verified: all three traces now share a start date and index to exactly 100,
+  and the benchmark reports its true window return (+4.5802%, where the old path
+  reported +4.5455%).
+- **Equal-Weight Comparison card row** added to Analytics, mirroring the
+  benchmark row: equal-weight return, excess return, Sharpe edge, volatility
+  edge, drawdown edge and correlation. The benchmark answers "did the book beat
+  the market?"; this answers what the allocator is actually accountable for —
+  "did it beat the same holdings in equal size?" Volatility Edge is coloured so
+  LOWER is favourable, since trading return for lower volatility is the intended
+  behaviour rather than a failure.
+- **Portfolio table** reordered to Symbol / Units / Price / Weight % / Value
+  first with the risk diagnostics after, and sorted by weight descending (was
+  cluster-then-weight; the risk heatmap still groups by cluster, where the block
+  structure is the point).
+- **Table scrollbar** now matches the rest of the app. The holdings table renders
+  through `components.html`, an isolated iframe that `ui/theme.css` never
+  reaches, so it drew a default OS scrollbar beside every themed one. The global
+  scrollbar rule is restated inside the iframe document.
+
+
+### 💥 Removed — the conviction stack
+
+Roughly **9,900 lines deleted**: `strategies.py` (95 engines), `intelligence.py`
+(passport calibration), `portfolio.py` (conviction weighting), plus
+`regime.compute_conviction_signals`, the Position Guide and Intelligence tabs,
+and the Model Passport sidebar. Each removal followed a measurement:
+
+- **Conviction blend** — no cross-sectional predictive power on this universe
+  (IC ~0.00-0.04, sign unstable by horizon); a top-quintile-by-conviction book
+  underperformed a bottom-quintile one.
+- **95-strategy library** — mean pairwise return correlation **0.972**, an
+  effective **1.03 independent strategies of 92**. Structural, not authorial:
+  60 random long-only portfolios of the same ETFs measure 0.962 correlated even
+  sharing no weights, because the assets are themselves 52% correlated.
+- **Per-regime calibration** — never cleared its own significance gate.
+
+### ✨ The system now
+
+- **Two styles only: Risk Parity (HRP) and Equal Weight.** Both travel the
+  identical pipeline — same eligibility filter, clustering diagnostics and risk
+  decomposition — so any on-screen difference is the allocator and nothing else.
+- **Five tabs** (was seven): Portfolio · Analytics · Regime · Broker Sync ·
+  System. Regime is retained as context; nothing is conditioned on it.
+- **New Portfolio tab** built on what actually drives the book: weight, risk
+  share, the risk-minus-weight gap, volatility and independence
+  (1 - |correlation to book|), grouped by cluster.
+- **Risk Profile heatmap** — successor to the conviction heatmap. Same shape
+  (one row per position, diverging colour) with the dimensions that matter, each
+  column a within-column percentile oriented so green is calm and diversifying.
+- **Risk Structure heatmap** — the correlation matrix quasi-diagonalized by
+  cluster, with amber rules on the boundaries. The diagnostic for the method:
+  crisp blocks mean real structure, a uniformly warm matrix means one bet.
+- **Risk Concentration** replaces Avg Conviction in the header: heaviest
+  holding's risk share against its equal share.
+
+### 📊 Honest performance note
+
+HRP **does not beat equal weight on return.** Across two genuinely disjoint
+periods it loses 0.96% and 1.23%/yr, while cutting volatility ~20%
+(13.81->11.28%, 12.97->10.38%) and drawdown (-6.89->-4.50%, -7.07->-6.15%).
+It is a volatility-reduction overlay, not an alpha source.
+
+An earlier nested-window test (2024+ was fully contained in 2023+) reported HRP
+beating equal weight; that result does not survive a disjoint split. All figures
+in this release use non-overlapping periods.
+
+---
+
+## [Unreleased]
+
+### ✨ Added
+
+- **Third portfolio style: Equal Weight.** The sidebar's Portfolio Style
+  selector now offers `Equal Weight` alongside `Swing Trading` and
+  `SIP Investment`. It builds an equally-weighted book — the user's selected
+  number of positions, drawn from the user's selected universe, funded with
+  the user's selected capital, each position receiving an identical
+  `100 / N` share.
+  - **Selection is unchanged.** All three styles pick the same names: top N by
+    conviction, ties broken by value-area position. Style decides only how
+    capital is spread across those names — Swing concentrates aggressively
+    (`conviction ** 4.5`), SIP moderately (`conviction ** 2.5`), Equal Weight
+    not at all.
+  - `portfolio.compute_conviction_based_weights()` short-circuits the
+    power-law dispersion transform when `investment_style == "Equal Weight"`.
+    The check runs **before** `apply_dispersion` / `dispersion_params`, so a
+    caller's dispersion arguments can never silently concentrate a book the
+    user asked to be equally weighted.
+  - The `1/N` weight always satisfies the effective per-position bounds by
+    construction (`min_pos_pct_eff <= 1/n <= max_pos_pct_eff`), so the
+    clip-renormalize loop is a no-op — a 5-position equal-weight book is a
+    clean 20% × 5, with the existing "bounds relaxed" caption explaining the
+    departure from the nominal 10% cap.
+  - `run_context` now freezes `investment_style` and `capital`, and the System
+    tab reports the style as **Portfolio Style** with a style-aware Weight
+    Formula (`1 / N (equal weight)`) and Methodology card. As with the rest of
+    `run_context`, this is the style the book was *actually* weighted under —
+    browsing the sidebar after a run cannot relabel a curated portfolio.
+- **Analytics: an equal-weight comparison trace.** On Swing Trading and SIP
+  Investment runs, the Relative Performance chart now carries a **third line** —
+  the same selected names, same anchor, same capital, split `1/N` — beside the
+  portfolio and the benchmark. The benchmark answers *"did the book beat the
+  market?"*; this answers *"did the conviction weighting earn its complexity?"*,
+  a question the benchmark cannot address. A caption under the chart states the
+  resulting edge (or drag) in one number.
+  - The isolation is only valid because selection is identical across styles, so
+    the shadow book differs from the real one in **weighting alone**. Its units
+    are `floor((capital / N) / anchor_price)` — exactly what an Equal Weight run
+    of the same scope would have produced, integer-lot flooring included, rather
+    than an idealized fractional `1/N`.
+  - `analytics.build_return_series()` takes an optional `alt_quantities` vector
+    and values it off the **same** price panel, returning it as a sixth tuple
+    element. Sharing one fetch is not just a cost saving: two independently
+    built series could land on different start dates after the leading-row trim
+    and would then be normalized from different bases — a silently wrong
+    comparison. Returns an empty Series when not requested.
+  - `charts.create_benchmark_comparison_chart()` accepts `alt_series` /
+    `alt_label` and draws it dashed violet (portfolio amber solid, benchmark
+    cyan dotted).
+  - Suppressed on Equal Weight runs, where the trace would draw the portfolio
+    line twice.
+- **Value-Area (vap) removed from the conviction blend.** It measurably
+  ANTI-predicted forward returns and was the specific cause of the composite
+  score's sign instability. Four independent lines of evidence, all agreeing:
+  - **Signal IC** negative at every horizon tested: 5d `-0.049`, 10d `-0.032`,
+    21d `-0.080`, 42d `-0.004`.
+  - **Quintile spread inverted** — a bottom-5-by-vap book beat a top-5-by-vap
+    book by +12.5% CAGR.
+  - **Blend IC improves at every horizon** once it is dropped, and the 21-day
+    sign flip is repaired: the six-signal composite scored `-0.040` at 21d,
+    the five-signal composite scores `+0.022`.
+  - **Portfolio return improves in 4/4 (window x style) cells**, with Sharpe up
+    in all four. Measured on the shipped code path, all 30 ETFs held:
+
+    ```
+                         2024+ window        2023+ window
+    before (with vap)  SIP -1.01%  Swing -0.56%   SIP +0.52%  Swing +1.09%
+    after  (no vap)    SIP +0.72%  Swing +1.51%   SIP +1.96%  Swing +2.73%
+    ```
+
+  The cause is structural, not statistical: `vap` is a mean-reversion construct
+  ("price at a discount to accepted value = buy") applied to trending
+  sector/thematic instruments, so its sign was wrong by construction rather
+  than merely weak. Note the individual t-statistics remain below 2 (max
+  +1.35) — the confidence here comes from four independent measurements
+  agreeing plus a mechanism, not from any single test.
+  - `DEFAULT_WEIGHTS` is now five signals at 1/5. `w_vap` no longer exists.
+  - Calibration searches a 4-simplex (`_softmax4`); `PASSPORT_VERSION` →
+    `v9-pragyam-conviction-novap`, invalidating v8 passports so every scope
+    recalibrates without vap.
+  - `vap` is still COMPUTED and surfaced as a diagnostic (`vap_value`), and the
+    regime detector's `acceptance` factor still uses it — that is a different
+    consumer and was not measured as harmful. `va_pos` (position inside the
+    value area) is a distinct quantity and still breaks selection ties.
+  - The VAP column is removed from the holdings table and the conviction
+    heatmap; freed width returns to Symbol and Signal.
+- **MA-alignment (`ma_signal`) removed from the conviction blend.** Same gate as
+  vap, same verdict:
+  - **Signal IC zero-to-negative at every horizon**: 5d `+0.005`, 10d `-0.018`,
+    21d `-0.030`, 63d `-0.068`.
+  - **Blend IC rises at every horizon** once it is dropped, and the 5-day
+    composite reaches `+0.063` at **t = +2.55** — the only statistically
+    significant reading produced anywhere in this testing.
+  - **Portfolio improves 4/4 (window x style)** on the shipped code path:
+
+    ```
+                      2024+ window            2023+ window
+    with vap + ma   SIP -1.01%  Swing -0.56%   SIP +0.52%  Swing +1.09%
+    vap removed     SIP +0.72%  Swing +1.51%   SIP +1.96%  Swing +2.73%
+    both removed    SIP +1.17%  Swing +2.03%   SIP +2.45%  Swing +3.47%
+    ```
+
+  `ma_signal` was a coarse count of five boolean MA conditions mapped onto
+  `[-2, +2]`; whatever trend content it carried is already expressed by RSI at
+  finer resolution, so on a 30-name cross-section it diluted the blend rather
+  than adding to it. `ma_count` is retained as a displayed diagnostic.
+  - The blend is now four signals — RSI, Oscillator, Z-Score,
+    Strategy-Endorsement — at 1/4 each. Calibration searches a 3-simplex
+    (`_softmax3`); `PASSPORT_VERSION` → `v10-pragyam-conviction-rsi-osc-z-strat`.
+  - MA column removed from the holdings table and conviction heatmap.
+
+  **Caveat carried forward:** vap and ma were both removed on the strength of
+  the same ~3 years of ETF history. Each removal is independently supported
+  (negative IC, blend IC improvement, 4/4 portfolio cells) and each has a
+  mechanism, but sequential pruning guided by one dataset is itself a form of
+  selection. Individual t-statistics remain below 2 (max +1.65).
+
+- **New curation stack: covariance-based portfolio construction (`nco.py`).**
+  Two new Portfolio Styles — **Risk Parity (HRP)** and **Nested Clustered (NCO)**
+  — that select AND weight purely from the return covariance structure. They
+  read no conviction score, no regime passport and no strategy endorsement; the
+  95 strategies are not run at all and Phase 1.5 calibration is skipped.
+  - **Why a second stack.** Grinold's Fundamental Law bounds excess return from
+    FORECASTING at `IR = IC x sqrt(BR) x TC`, which on this universe
+    (rho 0.517, ~1.9 effective bets, measured TC 0.88-0.92) is ~1%/yr. That
+    bound does not constrain covariance-based allocation, which forecasts
+    nothing — covariance is estimable from a few hundred observations in a way
+    expected returns are not (López de Prado 2016, 2019).
+  - **What it actually delivers — measured on the shipped module across two
+    GENUINELY DISJOINT periods (an earlier nested-window test flattered it):**
+
+    ```
+                       CAGR    vs 1/N     Vol   Sharpe    MaxDD
+    A 2023-12..2024-12
+           Equal      27.30%   +0.00%  13.81%    1.83    -6.89%
+           HRP        26.33%   -0.96%  11.28%    2.14    -4.50%
+           NCO        26.22%   -1.08%  11.53%    2.09    -4.67%
+    B 2025-01..2026-07
+           Equal      12.31%   +0.00%  12.97%    0.96    -7.07%
+           HRP        11.08%   -1.23%  10.38%    1.07    -6.15%
+           NCO        10.74%   -1.57%  10.36%    1.04    -6.24%
+    ```
+
+    **Neither beats equal weight on return** — both lose ~1-1.6%/yr in BOTH
+    periods. What is consistent is risk: HRP cuts volatility ~20% and improves
+    drawdown and Sharpe in both windows. The accurate description is a
+    volatility-reduction overlay costing ~1%/yr of return, not an alpha source.
+    HRP beats NCO on CAGR, Sharpe and drawdown in both windows — prefer HRP.
+  - An earlier nested-window test reported +0.13% to +0.78% excess return. Those
+    windows were not independent (2024+ was 100% contained in 2023+), and the
+    return edge does not survive a disjoint split. Research scripts showing
+    +3.2% to +8.9% were weaker still — a 20/27-period sub-sample with no
+    position cap.
+  - Ward clustering on the correlation distance finds **K ~= 3** (silhouette
+    ~0.28), independently matching the eigenvalue participation ratio of 2.95:
+    three real risk clusters inside 30 tickers.
+  - HRP is the recommended default — it inverts no matrix, produced the best
+    drawdown, and holds every name. NCO uses inverse-variance within clusters
+    and min-variance across them; min-variance *within* clusters was rejected
+    because it returned corner solutions concentrating the book in 8 of 28
+    names, defeating a 30-position mandate.
+  - `_apply_cap` enforces the position cap by headroom-fill rather than
+    clip-and-renormalize. The naive version does not converge — dividing by a
+    post-clip sum below 1 pushes capped names straight back over the line
+    (measured: 12.500070% against a 12.5% cap). No floor is applied at all: a
+    floor would fight the method, since a redundant asset whose risk a cluster
+    peer already carries *should* receive a small weight.
+  - Runs in ~2s against ~27s for the conviction path when the panel is cached.
+
+### 🐛 Fixed — live data pipeline
+
+- **63% of the ETF universe was silently missing from every book.** Each
+  symbol's indicator frame is indexed by its OWN print dates, and the snapshot
+  loop skipped any symbol without a row on the exact snapshot date. A thinly
+  traded instrument that simply didn't tick that day wasn't *stale* — it was
+  **gone**: excluded from candidates, from conviction scoring, and from the
+  portfolio. Measured on a live run for 2026-07-28, yfinance had not yet
+  published that bar for 19 of 30 ETFs, so the app curated an **11-position**
+  book from a 30-name universe and reported it as complete.
+  - `generate_historical_data` now reindexes every symbol onto the shared
+    trading calendar with a **bounded** forward fill (`ffill(limit=5)`). A short
+    data gap carries the last known values across; anything that has genuinely
+    stopped trading still drops out. The limit is what makes it safe — an
+    unbounded fill would keep a delisted instrument in the book forever at a
+    frozen price. Leading NaNs are untouched, so a symbol still cannot appear
+    before its history begins.
+  - Verified end to end: names per snapshot went from `min 11` to
+    `min 30 / median 30 / max 30`, and a live run went from
+    `Candidates: 11 / Positions: 11` to `Candidates: 30 / Positions: 30`.
+  - **This also reconciles the app with the research harness.** Every backtest
+    in this release was run on a 28-name panel built directly from yfinance,
+    which bypassed this path — so the measured results described a
+    well-diversified book while the live app was producing a far more
+    concentrated one. They now describe the same portfolio.
+
+### 🐛 Fixed — full-system audit
+
+- **Strategy Endorsement was statistically noise on any universe above ~150
+  symbols.** `BaseStrategy._allocate_portfolio` clips weights to a 1% floor,
+  but strategies are handed the WHOLE universe (they filter nothing), so once
+  the candidate count passes ~100 the average weight `1/N` falls below that
+  floor, the floor binds for essentially every name, and the weight
+  distribution collapses to a **single value** (measured: 500 candidates → 1
+  distinct weight). Phase 2 ranked its top-quartile endorsement vote on that
+  flattened column, so `nlargest` fell through to DataFrame row order — i.e.
+  the vote was cast by *universe ordering*. Measured top-quartile overlap with
+  the strategy's true ranking: **21.6% at N=500 against a 25% random-chance
+  baseline.** That noise then entered conviction as a full sixth signal at a
+  weight `calibrate()` is structurally forbidden from learning away.
+  - `_allocate_portfolio` now emits `raw_weight_pct`, the strategy's own
+    conviction *before* the bounds, and Phase 2 ranks the vote on it.
+    Post-fix overlap: **100% at every N tested.**
+  - A strategy whose ranking column is constant (e.g. the equal-weight fallback
+    taken when its multipliers degenerate) now **abstains** instead of casting a
+    row-order vote. Run logs report votes cast vs abstentions, and a run where
+    nobody voted raises a warning rather than silently scoring on five signals.
+- **The allocator's bounds loop always exited after one pass.** It tested
+  `abs(sum - 1.0) < 1e-6` immediately after dividing by the sum — true by
+  construction — so the final normalize left names outside the bounds it exists
+  to enforce (measured: 14 of 40 below the 1% floor). It now converges on the
+  bounds themselves, with the floor **dropped** (not tightened to `1/n`, which
+  admits only the uniform solution) when `n * 1% > 1` makes it infeasible.
+- **The Cash card was red exactly when the system was working.** Thresholds ran
+  `<5% = danger`, but integer-lot flooring leaves ~0.5–2% residual by
+  construction, so the correct outcome painted red on *every* run while a book
+  leaving ≥15% of capital uninvested painted green. Inverted to match what the
+  engine is for: full deployment is success, large idle cash is the defect.
+- **Deployed / Cash were computed against the live sidebar capital.** Streamlit
+  reruns on any widget change, so nudging the capital input repainted those
+  cards against a number the book was never sized for — without recurating a
+  position. Now read from the frozen `run_context`, same as every other scope
+  value (the A12 class of bug).
+- **Calibration and inference scored rows differently.** `_weighted_score` gave
+  a missing signal a neutral 0 at *full weight*, while
+  `regime.compute_conviction_signals` renormalizes weights over the signals that
+  actually have data. Weights were learned under one composition rule and
+  deployed under another — invisible for a universe-wide dead signal, wrong for
+  partial coverage (e.g. short-history names missing `ma200`). The harvest now
+  carries per-signal availability flags and `_weighted_score` renormalizes per
+  row, matching inference exactly. `PASSPORT_VERSION` → `v8-pragyam-conviction-renorm`,
+  which invalidates v7 passports so every scope recalibrates against the
+  corrected objective.
+- **Failed calibration re-paid its full cost on every run.** Failure is a common
+  path (the significance gate needs ≥ `min_calibration_dates()` in-family dates,
+  which many scopes lack), and it is the expensive one: `build_harvest` is an
+  `iterrows()` loop over the whole estimation panel (~200k row iterations at 500
+  symbols) that ran *before* `calibrate()` could fail-fast. A session-scoped
+  negative cache keyed on `(scope, anchor date)` now short-circuits the repeat,
+  and both Reset paths clear it so a deliberate reset always re-tries.
+- **Passports overstated their own evidence.** `n_train_dates` reported the
+  train partition's date *span* (~70) while the IR behind it is estimated from
+  non-overlapping dates only (~7) — making a 5-parameter, 100-trial search look
+  far better evidenced than it is. Passports now also record
+  `n_train_ic_dates` / `n_val_ic_dates`, and the Intelligence card reports
+  "N independent dates of M spanned".
+- **The circuit breaker counted cumulative, not consecutive, failures.**
+  `_on_success` reset the counter only in `HALF_OPEN`, and the breaker is a
+  process-lifetime singleton, so five unrelated transients spread across hours
+  of successful calls would trip it. A success in `CLOSED` now clears the run.
+- **Re-scoring an already-scored portfolio was a silent no-op.**
+  `compute_conviction_signals` merged only columns *absent* from the input, so
+  the result tabs (which pass the curated book) ran a full scoring pass and
+  discarded it, returning the stale values. Recomputed signals now replace the
+  old ones.
+- **`_clean_data` substituted another security's price level for a missing MA.**
+  The fallback was the universe's *median price*, which in a per-symbol
+  deviation term manufactures a huge fake premium/discount purely from the
+  price-level gap (a ₹50 name against a ₹1,200 median reads as a 96%
+  discount). Not a rare path: `ma200 weekly` needs ~4 years of weekly bars and
+  the fetch window is at most ~2 years, so it is NA for every symbol on every
+  run and all 65 of its references consumed this fallback. Now falls back to
+  the symbol's own price — deviation exactly 0, the correct "no information"
+  value.
+- **`MIN_TOTAL_DATES = 20` was vestigial.** It had been dominated by
+  `min_calibration_dates()` (142 at the defaults) since v10.0.1 — two numbers
+  describing one requirement, one of them wrong. Removed; the requirement is
+  now derived in one place.
+
+---
+
 ## [10.0.1] - 2026-07-06
 
 ### 🐛 Fixed

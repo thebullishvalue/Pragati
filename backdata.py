@@ -14,8 +14,7 @@ Produces, per symbol per day (daily and weekly timeframes where noted):
 
 The canonical column set is ``COLUMN_ORDER``; ``generate_historical_data``
 returns a chronological list of ``(date, snapshot_df)`` tuples in that shape,
-which the regime detector, conviction scoring, and intelligence calibration all
-read.
+which the regime detector and the covariance curation both read.
 
 Author: @thebullishvalue
 """
@@ -26,7 +25,6 @@ from datetime import datetime, timedelta
 import warnings
 import os
 from typing import List, Tuple, Dict, Any
-import time
 
 # Import circuit breaker and metrics
 from circuit_breaker import yfinance_circuit, RetryWithBackoff
@@ -112,8 +110,8 @@ def calculate_rsi(data: pd.DataFrame, period: int = 14) -> pd.Series:
     # min_periods=period, not from an all-gains window) as a maximally
     # overbought 100 — a phantom signal where there is actually no data yet.
     # Only backfill the true all-gains case; leave warm-up NaNs as NaN so
-    # downstream consumers (regime factors, conviction signals, calibration
-    # harvest) treat them as "no signal" like every other indicator's warmup.
+    # downstream consumers treat them as "no signal" like every other
+    # indicator's warmup.
     all_gains = avg_loss.eq(0) & avg_gain.notna() & (avg_gain > 0)
     rsi = rsi.where(~all_gains, 100.0)
     return rsi
@@ -140,7 +138,7 @@ def compute_volume_profile(
                          [-3, +3]. Positive = price trades at a *discount* to
                          accepted value (mean-reversion long), negative = at a
                          *premium*. This is the cross-sectional signal feeding
-                         ``vap_signal`` in the conviction blend.
+                         the regime detector's acceptance factor.
       • ``va_pos``     – raw position of close within [VAL, VAH] mapped to
                          [-1, +1] (inside-value vs at-an-edge), used by the
                          portfolio selection layer for structural hold/rotate.
@@ -320,7 +318,7 @@ def calculate_all_indicators(
     # ── Volume profile (daily only): POC / value-area position ────────────────
     #  Measured, no-inference structure ported from the Inferred-Delta volume
     #  profile. Gives the system its missing "where volume actually traded"
-    #  dimension; feeds vap_signal in the conviction blend + the selection layer.
+    #  dimension; feeds the regime detector's acceptance factor.
     vp = compute_volume_profile(daily_data)
     all_results_df['poc latest'] = vp['poc']
     all_results_df['vap latest'] = vp['vap']
@@ -560,6 +558,31 @@ def generate_historical_data(
     # over-fetches enough calendar days (see _load_historical_data's x1.5+30
     # buffer) to have that many bars available before the requested window.
     _warm_dates = set(date_range[:MAX_INDICATOR_PERIOD])
+
+    # Align every symbol onto the SHARED trading calendar with a bounded
+    # forward-fill.
+    #
+    # Each symbol's indicator frame is indexed by its OWN print dates. A thinly
+    # traded instrument that simply didn't tick on a given day was therefore
+    # absent from that day's snapshot entirely — not "stale", but gone: excluded
+    # from the eligible set and from the book. On the ETF
+    # universe this silently removed 19 of 30 names from the live run measured
+    # on 2026-07-28, because yfinance had not yet published that bar for them.
+    # A one-day data gap is not a reason to liquidate a position.
+    #
+    # Reindexing onto the union calendar with ffill(limit=_STALE_BARS) carries a
+    # symbol's last known values across a short gap while still dropping
+    # anything that has genuinely stopped trading. The limit is what makes this
+    # safe: an unbounded ffill would keep a delisted instrument in the book
+    # forever at a frozen price. Leading NaNs are untouched (ffill only
+    # propagates forward), so a symbol still cannot appear before its history
+    # begins, and the warmup skip above is unaffected.
+    _STALE_BARS = 5
+    for _t in list(ticker_indicator_cache):
+        _df = ticker_indicator_cache[_t]
+        if _df is None or _df.empty:
+            continue
+        ticker_indicator_cache[_t] = _df.reindex(date_range).ffill(limit=_STALE_BARS)
 
     for snapshot_date in date_range:
         # --- Only start generating snapshots *after* the indicator warmup

@@ -12,7 +12,7 @@ import sys
 import uuid
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENABLE ANSI ON WINDOWS - Using colorama for reliability
@@ -193,7 +193,6 @@ class ConsoleOutput:
     def checkpoint(self, name: str, status: str = "OK"):
         """Print checkpoint."""
         symbol = Colors.GREEN + Colors.SUCCESS if status == "OK" else Colors.RED + Colors.ERROR
-        color = Colors.GREEN if status == "OK" else Colors.RED
         self._write(f"  {symbol} Checkpoint:{Colors.RESET} {name} {Colors.GRAY}[{status}]{Colors.RESET}")
     
     def summary(self, title: str, data: Dict[str, Any]):

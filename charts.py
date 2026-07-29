@@ -13,7 +13,6 @@ Author: @thebullishvalue
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any
 
 from ui.theme import chart_layout, style_axes
 
@@ -177,113 +176,127 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def create_conviction_heatmap(portfolio_with_signals: pd.DataFrame) -> go.Figure:
-    """Signal-strength heatmap for portfolio holdings.
+def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
+    """Per-holding risk profile — the successor to the conviction heatmap.
 
-    Each row is a position; columns are RSI, Oscillator, Z-Score, MA Alignment,
-    Value Area (VAP, shown when present), and the composite Conviction score.
-    Colours run red → amber → green.
+    Same idea as the signal heatmap it replaces (one row per position, one
+    column per dimension, diverging colour), but the dimensions are the ones
+    that actually drive a covariance-curated book:
 
-    Trace colors match Nishkarsh exactly:
-    - Rose (bear): #FB7185
-    - Emerald (bull): #34D399
-    - Slate (neutral): rgba(148,163,184,0.4)
+      Weight        share of capital
+      Risk Share    share of PORTFOLIO VARIANCE this holding contributes
+      Volatility    its own annualized volatility
+      Independence  1 - |correlation to the finished book|
 
-    Args:
-        portfolio_with_signals: DataFrame from compute_conviction_signals().
+    Colour is a within-column percentile, so each column is read against its own
+    peers rather than on incompatible absolute scales. Every column is oriented
+    so GREEN is the calm, diversifying end: low volatility, high independence,
+    and — for Weight and Risk Share — a contribution close to its equal share
+    rather than a concentration. That makes a well-balanced book read as an
+    even green field, and any red row is a position carrying more risk than its
+    capital suggests.
 
-    Returns:
-        Plotly Figure (heatmap).
+    The gap between the Weight and Risk Share columns is the whole point of the
+    method: equal capital does NOT mean equal risk, and this is where you see it.
     """
-    required = ["symbol", "rsi_signal", "osc_signal", "zscore_signal", "ma_signal", "conviction_score"]
-    if portfolio_with_signals.empty or not all(c in portfolio_with_signals.columns for c in required):
+    need = ["symbol", "weightage_pct"]
+    if portfolio is None or portfolio.empty or not all(c in portfolio.columns for c in need):
         fig = go.Figure()
-        fig.update_layout(**chart_layout(height=200))
+        fig.update_layout(**chart_layout(height=220))
         return fig
 
-    df = portfolio_with_signals.sort_values("conviction_score", ascending=False).head(40)
+    df = portfolio.copy()
+    for c, default in (("risk_contribution", np.nan), ("volatility", np.nan),
+                       ("corr_to_book", np.nan), ("cluster", 0)):
+        if c not in df.columns:
+            df[c] = default
+    # Cluster first, then weight — so structurally similar holdings sit together
+    # and the block pattern is legible.
+    df = df.sort_values(["cluster", "weightage_pct"], ascending=[True, False]).head(40)
 
-    signal_cols = ["rsi_signal", "osc_signal", "zscore_signal", "ma_signal"]
-    col_labels = ["RSI", "Oscillator", "Z-Score", "MA Align"]
-    # Value-Area Position (volume profile) and Strategy Endorsement — show
-    # only when present so older snapshots without the column still render
-    # the legacy signal set.
-    if "vap_signal" in df.columns:
-        signal_cols.append("vap_signal")
-        col_labels.append("Value Area")
-    if "strat_signal" in df.columns:
-        signal_cols.append("strat_signal")
-        col_labels.append("Strategy")
+    n = len(df)
+    eq_share = 1.0 / n if n else 0.0
+    w = pd.to_numeric(df["weightage_pct"], errors="coerce").fillna(0.0) / 100.0
+    rc = pd.to_numeric(df["risk_contribution"], errors="coerce").fillna(eq_share)
+    vol = pd.to_numeric(df["volatility"], errors="coerce")
+    indep = 1.0 - pd.to_numeric(df["corr_to_book"], errors="coerce").abs()
 
-    # Conviction score column: scale [0,100] → [-2,2] for unified colorscale
-    conviction_normalised = (df["conviction_score"] / 100.0) * 4.0 - 2.0
+    # Raw display values, and the "greener is better" ordering key per column.
+    cols = [
+        ("Weight",       w * 100.0,   -(w - eq_share).abs(), "{:.2f}%"),
+        ("Risk Share",   rc * 100.0,  -(rc - eq_share).abs(), "{:.2f}%"),
+        ("Volatility",   vol * 100.0, -vol,                   "{:.1f}%"),
+        ("Independence", indep,        indep,                 "{:.2f}"),
+    ]
 
-    z_matrix = np.column_stack(
-        [df[col].fillna(0).values for col in signal_cols] + [conviction_normalised.values]
-    )
+    z, text = [], []
+    for _, raw, key, fmt in cols:
+        k = pd.to_numeric(key, errors="coerce")
+        pct = k.rank(pct=True) if k.notna().sum() > 1 else pd.Series(0.5, index=k.index)
+        z.append((pct.fillna(0.5) * 2.0 - 1.0).tolist())
+        text.append([fmt.format(v) if pd.notna(v) else "—" for v in raw])
 
-    text_matrix = np.column_stack(
-        [df[col].fillna(0).apply(lambda x: f"{x:+.0f}").values for col in signal_cols]
-        + [df["conviction_score"].apply(lambda x: f"{int(x)}").values]
-    )
-
-    # Terminal Glass diverging colorscale: Rose → Warm Slate → Emerald
-    # More saturated at extremes, muted in center for clarity
-    fig = go.Figure(
-        go.Heatmap(
-            z=z_matrix.T,
-            x=df["symbol"].values,
-            y=col_labels + ["Conviction"],
-            colorscale=[
-                [0.0, "#E8555A"],       # Deep rose (strong bear)
-                [0.15, "#E07060"],      # Rose-orange transition
-                [0.35, "#B8956A"],      # Warm amber-slate
-                [0.5, "#8B7E6A"],       # Warm slate (neutral)
-                [0.65, "#6A9E78"],      # Sage green
-                [0.85, "#3DC49A"],      # Bright emerald
-                [1.0, "#2DD4A8"],       # Deep emerald (strong bull)
-            ],
-            zmid=0,
-            zmin=-2,
-            zmax=2,
-            text=text_matrix.T,
-            texttemplate="%{text}",
-            textfont=dict(size=10, family="IBM Plex Mono, monospace", color="rgba(255,255,255,0.9)"),
-            showscale=True,
-            colorbar=dict(
-                title="Signal",
-                tickvals=[-2, -1, 0, 1, 2],
-                ticktext=["Strong Bear", "Bear", "Neutral", "Bull", "Strong Bull"],
-                tickfont=dict(family="IBM Plex Mono, monospace", color="#94A3B8", size=10),
-                bgcolor="rgba(10, 14, 23, 0.95)",
-                bordercolor="rgba(212, 168, 83, 0.25)",
-                borderwidth=1,
-                thickness=16,
-                len=0.75,
-                y=0.5,
-                yanchor="middle",
-                x=1.02,
-                xanchor="left",
-                outlinewidth=0,
-                tickangle=0,
-            ),
-            hovertemplate="<b>%{x}</b><br>%{y}: %{text}<br><span style='opacity:0.7;'>Signal Strength</span><extra></extra>",
-            xgap=2,
-            ygap=2,
-        )
-    )
-
-    n_positions = len(df)
-    fig_height = max(220, min(500, 60 + n_positions * 22))
-
-    # Apply Obsidian Quant theme
-    fig.update_layout(**chart_layout(height=fig_height, show_legend=False))
+    labels = [c[0] for c in cols]
+    fig = go.Figure(go.Heatmap(
+        z=z, x=df["symbol"].tolist(), y=labels,
+        text=text, texttemplate="%{text}",
+        textfont=dict(size=9, family="IBM Plex Mono, monospace"),
+        colorscale=[[0.0, COLORS["rose"]], [0.5, COLORS["slate_dim"]], [1.0, COLORS["emerald"]]],
+        zmid=0.0, zmin=-1.0, zmax=1.0, showscale=False, xgap=2, ygap=3,
+        hovertemplate="<b>%{x}</b><br>%{y}: %{text}<extra></extra>",
+    ))
+    fig.update_layout(**chart_layout(height=max(200, 46 * len(labels) + 90), show_legend=False))
     style_axes(fig)
+    fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
+    fig.update_yaxes(autorange="reversed")
+    return fig
 
-    # Additional heatmap-specific styling
-    fig.update_xaxes(tickangle=-45, tickfont=dict(size=10, family="IBM Plex Mono, monospace", color="#64748B"), gridwidth=1, gridcolor="rgba(255,255,255,0.03)")
-    fig.update_yaxes(tickfont=dict(size=11, family="IBM Plex Mono, monospace", color="#64748B"), gridwidth=1, gridcolor="rgba(255,255,255,0.03)")
-    
+
+def create_cluster_correlation_heatmap(corr: "pd.DataFrame | None",
+                                       cluster_labels: "dict | None" = None) -> go.Figure:
+    """Holdings correlation matrix, reordered so cluster blocks are visible.
+
+    This is the quasi-diagonalization at the heart of hierarchical allocation:
+    reorder the correlation matrix by the clustering and the structure stops
+    being a wall of numbers and becomes visible blocks along the diagonal. Each
+    block is a group of holdings that move together — a single bet wearing
+    several tickers.
+
+    It is the diagnostic for the whole method. If the blocks are crisp, the
+    clustering found something real and the allocator is spreading capital
+    across genuinely distinct risks. If the matrix is uniformly warm with no
+    block structure, the universe is one bet and no allocator can fix that.
+    """
+    if corr is None or not isinstance(corr, pd.DataFrame) or corr.empty:
+        fig = go.Figure()
+        fig.update_layout(**chart_layout(height=260))
+        return fig
+
+    syms = list(corr.columns)
+    fig = go.Figure(go.Heatmap(
+        z=corr.to_numpy(), x=syms, y=syms,
+        colorscale=[[0.0, COLORS["emerald"]], [0.5, "rgba(20,20,24,0.85)"], [1.0, COLORS["rose"]]],
+        zmid=0.0, zmin=-1.0, zmax=1.0, showscale=True,
+        colorbar=dict(title=dict(text="ρ", font=dict(size=10)), thickness=10, len=0.7,
+                      tickfont=dict(size=9)),
+        hovertemplate="<b>%{x}</b> vs <b>%{y}</b><br>ρ = %{z:.2f}<extra></extra>",
+    ))
+
+    # Rule off the cluster boundaries so the blocks are unambiguous.
+    if cluster_labels:
+        seq = [cluster_labels.get(sm) for sm in syms]
+        for i in range(1, len(seq)):
+            if seq[i] != seq[i - 1]:
+                fig.add_shape(type="line", x0=i - 0.5, x1=i - 0.5, y0=-0.5, y1=len(syms) - 0.5,
+                              line=dict(color=COLORS["amber"], width=1.2))
+                fig.add_shape(type="line", y0=i - 0.5, y1=i - 0.5, x0=-0.5, x1=len(syms) - 0.5,
+                              line=dict(color=COLORS["amber"], width=1.2))
+
+    size = max(320, min(620, 20 * len(syms) + 120))
+    fig.update_layout(**chart_layout(height=size, show_legend=False))
+    style_axes(fig)
+    fig.update_xaxes(tickangle=-60, tickfont=dict(size=8))
+    fig.update_yaxes(tickfont=dict(size=8), autorange="reversed")
     return fig
 
 
@@ -292,18 +305,24 @@ def create_benchmark_comparison_chart(
     bench_series: "pd.Series | None",
     benchmark_name: str = "Benchmark",
     port_return: float = 0.0,
+    alt_series: "pd.Series | None" = None,
+    alt_label: str = "Equal Weight",
 ) -> go.Figure:
-    """Normalized portfolio-vs-benchmark line chart (both pegged to 100).
+    """Normalized portfolio-vs-benchmark line chart (all series pegged to 100).
 
     Args:
         port_value: Portfolio value time series (any base; normalized to 100).
         bench_series: Benchmark price series (or None to plot portfolio only).
         benchmark_name: Legend label for the benchmark.
         port_return: Portfolio period return (%) for the legend label.
+        alt_series: Optional third value series — the same book weighted a
+            different way (the equal-weight shadow book). None omits the trace.
+        alt_label: Legend label for ``alt_series``.
 
     Returns:
         Plotly Figure in the Obsidian Quant theme — amber portfolio line,
-        dotted cyan benchmark line, value axis on the right.
+        dotted cyan benchmark line, dashed violet alternate-weighting line,
+        value axis on the right.
     """
     fig = go.Figure()
     if port_value is None or len(port_value) == 0:
@@ -317,6 +336,22 @@ def create_benchmark_comparison_chart(
         line=dict(color=COLORS["amber"], width=2.5),
         hovertemplate="%{x|%b %d, %Y}<br>Portfolio: %{y:.2f}<extra></extra>",
     ))
+
+    # Equal-weight shadow of the SAME names, plotted between the book and the
+    # benchmark in visual weight: it is the closer, more diagnostic comparison
+    # (it isolates the weighting decision, holding selection constant), so it
+    # gets its own hue rather than reusing the benchmark's.
+    if alt_series is not None and len(alt_series) > 0:
+        alt = alt_series.dropna()
+        if len(alt) > 0 and float(alt.iloc[0]) != 0:
+            alt_norm = (alt / alt.iloc[0]) * 100.0
+            alt_ret = ((alt.iloc[-1] / alt.iloc[0]) - 1) * 100.0
+            fig.add_trace(go.Scatter(
+                x=alt_norm.index, y=alt_norm.values, mode="lines",
+                name=f"{alt_label} ({alt_ret:+.2f}%)",
+                line=dict(color=COLORS["violet"], width=2, dash="dash"),
+                hovertemplate=f"%{{x|%b %d, %Y}}<br>{alt_label}: %{{y:.2f}}<extra></extra>",
+            ))
 
     if bench_series is not None and len(bench_series) > 0:
         bench = bench_series.dropna()
@@ -340,6 +375,7 @@ def create_benchmark_comparison_chart(
 __all__ = [
     "COLORS",
     "create_regime_history_chart",
-    "create_conviction_heatmap",
+    "create_risk_allocation_heatmap",
+    "create_cluster_correlation_heatmap",
     "create_benchmark_comparison_chart",
 ]

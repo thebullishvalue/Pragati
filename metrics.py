@@ -18,7 +18,6 @@ import time
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-import numpy as np
 
 
 @dataclass

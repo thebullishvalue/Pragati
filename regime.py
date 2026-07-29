@@ -2,12 +2,18 @@
 PRAGYAM — Market Regime Intelligence
 ══════════════════════════════════════════════════════════════════════════════
 
-Institutional-grade market regime detection with multi-factor composite scoring.
+Market regime detection with multi-factor composite scoring.
+
+This module is now DISPLAY AND CONTEXT ONLY. Conviction scoring lived here and
+was removed: measured on the ETF universe the blend had no cross-sectional
+predictive power (IC ~0.00-0.04, sign unstable across horizons), and the
+portfolio is now curated from the return covariance structure (see nco.py).
+The regime read is retained because it is genuinely informative about market
+state, not because anything downstream is conditioned on it.
 
 8-Factor Composite Scoring Architecture — blended with FIXED weights (see
-FACTOR_WEIGHTS). The regime detector is NOT calibrated; only the conviction blend
-learns weights. This is the legacy hardcoded-weighting design, extended with the
-volume-profile `acceptance` factor.
+FACTOR_WEIGHTS). Nothing in this system is calibrated any more — the weights
+below are fixed by design, which is what makes the regime read reproducible.
   1. Momentum    (28%) — RSI trajectory + oscillator direction
   2. Trend       (23%) — Price/MA alignment + pct stocks above 200DMA
   3. Breadth     (14%) — Cross-sectional RSI/oscillator distribution
@@ -77,7 +83,7 @@ REGIME_MIX_MAP: Dict[str, str] = {
 FACTOR_SCORE_RANGE = (-2.0, 2.0)
 
 # Fixed 8-factor composite weights. The regime detector uses these directly — it
-# is NOT calibrated (unlike the conviction blend). This mirrors the legacy
+# is NOT calibrated. This mirrors the legacy
 # hardcoded-weighting design, extended with the volume-profile `acceptance`
 # factor at a small fixed weight. Correlation stays a 0-weight diagnostic.
 FACTOR_WEIGHTS: Dict[str, float] = {
@@ -103,7 +109,7 @@ class FactorScores:
     # Acceptance: cross-sectional volume-profile read — how much of the universe
     # is trading at a DISCOUNT to its accepted value (vap). Contributes to the
     # composite at a FIXED weight (see FACTOR_WEIGHTS) like every other factor —
-    # the regime detector is NOT calibrated (only the conviction blend is).
+    # the regime detector is NOT calibrated.
     acceptance:  Dict[str, Any] = field(default_factory=dict)
 
     def _active_weights(self) -> Dict[str, float]:
@@ -254,7 +260,7 @@ class MarketRegimeDetector:
         Detect market regime from a list of (date, DataFrame) historical snapshots.
 
         The 8 factors are blended with FIXED weights (FACTOR_WEIGHTS) — the regime
-        detector is not calibrated (only the conviction blend is).
+        detector is not calibrated.
 
         Args:
             historical_data: Chronologically ordered list of (date, indicator_df) tuples.
@@ -522,7 +528,7 @@ class MarketRegimeDetector:
         icon_svg = get_icon(icon_key, size=20, stroke_width=2)
 
         lines = [
-            f'<div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">{icon_svg} <span style="font-size:1.2rem; font-weight:700;">{regime.replace("_", " ")}</span></div>',
+            f'<div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">{icon_svg} <span style="font-size: 1.3rem; font-weight:700;">{regime.replace("_", " ")}</span></div>',
             f"**Composite Score:** {score:+.2f} | **Confidence:** {confidence:.0%}",
             "",
             f"**Market Assessment:** {REGIME_DESCRIPTIONS.get(regime, '')}",
@@ -539,7 +545,7 @@ class MarketRegimeDetector:
             else:
                 dir_icon = "—"
             
-            lines.append(f'<div style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:4px;">'
+            lines.append(f'<div style="display:flex; align-items:center; gap:6px; font-size: 0.95rem; margin-bottom:4px;">'
                          f'• <strong>{fname}</strong> ({fweight:.0%} weight): {flabel} '
                          f'<span style="color:{"var(--emerald)" if fscore > 0.2 else ("var(--rose)" if fscore < -0.2 else "var(--ink-tertiary)")}; display:inline-flex; align-items:center;">'
                          f'{dir_icon}</span> <strong>{fscore:+.1f}</strong></div>')
@@ -597,196 +603,6 @@ def get_regime_history_series(
     return results
 
 
-def compute_conviction_signals(
-    portfolio: pd.DataFrame,
-    current_df: pd.DataFrame,
-    universe: str = "default",
-    selected_index: Optional[str] = None,
-    regime_name: str = "NEUTRAL",
-    mode: str = "Standard",
-) -> pd.DataFrame:
-    """
-    Compute signal-based conviction scores for each portfolio holding.
-
-    Reads the live indicator snapshot (current_df) and produces six signals
-    plus a composite conviction score (0–100) per position.
-
-    The six signals (RSI, OSC, Z-Score, MA-alignment, VAP/value-area position,
-    and Strategy-Endorsement) each lie in [-2, +2]. The composite is a weighted
-    average; in Standard mode the weights are the even fallback
-    0.1667 x6, and in Intelligence mode they come from the per-(universe,
-    index, regime) passport on the 6-simplex. Either way the raw score stays
-    in [-2, +2] and maps linearly to [0, 100].
-    """
-    if portfolio.empty or current_df.empty:
-        return portfolio.copy()
-
-    from intelligence import get_active_weights, DEFAULT_WEIGHTS
-    w = get_active_weights(universe, selected_index, regime_name, mode)
-    for k, default in DEFAULT_WEIGHTS.items():
-        w.setdefault(k, default)
-
-    result = portfolio.copy()
-    lookup_df = current_df.copy()
-    if "symbol" in lookup_df.columns:
-        lookup_df = lookup_df.set_index("symbol")
-
-    # Cross-sectional percentile rank of strategy-endorsement votes (how many
-    # of the 95 strategies picked this symbol among their own top-quartile
-    # holdings — see app.py Phase 2). Rank-based rather than raw vote count so
-    # the signal is comparable across universes of very different strategy
-    # hit-rates; mapped to [-2, +2] like every other signal (rank 0 -> -2,
-    # rank 1 -> +2, no votes anywhere -> neutral 0 for every symbol).
-    strat_pct = None
-    if "strat_votes" in lookup_df.columns:
-        votes = pd.to_numeric(lookup_df["strat_votes"], errors="coerce").fillna(0)
-        if votes.max() > 0:
-            strat_pct = votes.rank(pct=True, method="average")
-
-    rows = []
-    for _, port_row in result.iterrows():
-        sym = port_row["symbol"]
-        sig: Dict[str, Any] = {
-            "symbol": sym,
-            "rsi_signal": 0, "osc_signal": 0,
-            "zscore_signal": 0, "ma_signal": 0, "vap_signal": 0, "strat_signal": 0,
-            "rsi_value": None, "osc_value": None,
-            "zscore_value": None, "ma_count": None,
-            "vap_value": None, "va_pos": None,
-            "strat_votes": None,
-            "signals_available": 0,
-            "conviction_score": 50,
-        }
-
-        if sym not in lookup_df.index:
-            rows.append(sig)
-            continue
-
-        d = lookup_df.loc[sym]
-        # Which of the six weight keys had real data for this symbol (as
-        # opposed to a signal that defaulted to neutral 0 because the input
-        # was missing/NaN — e.g. FX/some futures report zero volume, so
-        # osc_signal/vap_signal are always 0-by-default for every symbol in
-        # that universe, not because the market said "neutral"). Used to
-        # renormalize the weight sum below (see AUDIT_DIRECTIVES.md A14).
-        available_keys: List[str] = []
-
-        # ── RSI ──────────────────────────────────────────────────────────────
-        rsi = d.get("rsi latest")
-        if rsi is not None and not pd.isna(rsi):
-            rsi = float(rsi)
-            sig["rsi_value"] = round(rsi, 1)
-            if rsi > 60:        sig["rsi_signal"] = 2
-            elif rsi > 52:      sig["rsi_signal"] = 1
-            elif rsi < 40:      sig["rsi_signal"] = -2
-            elif rsi < 48:      sig["rsi_signal"] = -1
-            available_keys.append("w_rsi")
-
-        # ── Oscillator ───────────────────────────────────────────────────────
-        osc  = d.get("osc latest")
-        ema9 = d.get("9ema osc latest")
-        if osc is not None and ema9 is not None and not pd.isna(osc) and not pd.isna(ema9):
-            osc, ema9 = float(osc), float(ema9)
-            sig["osc_value"] = round(osc, 1)
-            if osc > ema9 and osc > 0:    sig["osc_signal"] = 2
-            elif osc > ema9:              sig["osc_signal"] = 1
-            elif osc < ema9 and osc < 0:  sig["osc_signal"] = -2
-            else:                         sig["osc_signal"] = -1
-            available_keys.append("w_osc")
-
-        # ── Z-Score ──────────────────────────────────────────────────────────
-        zscore = d.get("zscore latest")
-        if zscore is not None and not pd.isna(zscore):
-            zscore = float(zscore)
-            sig["zscore_value"] = round(zscore, 2)
-            if zscore < -2.0:     sig["zscore_signal"] = 2
-            elif zscore < -1.0:   sig["zscore_signal"] = 1
-            elif zscore > 2.0:    sig["zscore_signal"] = -2
-            elif zscore > 1.0:    sig["zscore_signal"] = -1
-            available_keys.append("w_z")
-
-        # ── MA Alignment ─────────────────────────────────────────────────────
-        price = d.get("price")
-        ma20  = d.get("ma20 latest")
-        ma90  = d.get("ma90 latest")
-        ma200 = d.get("ma200 latest")
-        vals  = [price, ma20, ma90, ma200]
-        if all(v is not None and not pd.isna(v) and float(v) > 0 for v in vals):
-            price, ma20, ma90, ma200 = [float(v) for v in vals]
-            count = sum([price > ma20, price > ma90, price > ma200, ma20 > ma90, ma90 > ma200])
-            sig["ma_count"] = count
-            sig["ma_signal"] = round((count - 2.5) * (4.0 / 5.0), 1)
-            available_keys.append("w_ma")
-
-        # ── Value-Area Position (volume profile) ─────────────────────────────
-        #  vap > 0 → discount to accepted value (long), vap < 0 → premium (sell).
-        #  Bands mirror the z-score thresholds; signal lives in [-2, +2].
-        vap = d.get("vap latest")
-        if vap is not None and not pd.isna(vap):
-            vap = float(vap)
-            sig["vap_value"] = round(vap, 2)
-            if vap > 2.0:        sig["vap_signal"] = 2
-            elif vap > 1.0:      sig["vap_signal"] = 1
-            elif vap < -2.0:     sig["vap_signal"] = -2
-            elif vap < -1.0:     sig["vap_signal"] = -1
-            available_keys.append("w_vap")
-        # va_pos: where price sits inside the value area ([-1,+1]); used by the
-        # portfolio selection layer for structural hold/rotate decisions.
-        va_pos = d.get("va_pos latest")
-        if va_pos is not None and not pd.isna(va_pos):
-            sig["va_pos"] = round(float(va_pos), 3)
-
-        # ── Strategy Endorsement ───────────────────────────────────────────────
-        #  Cross-sectional percentile rank of how many of the 95 strategies
-        #  picked this symbol among their own top-quartile holdings, mapped
-        #  linearly onto [-2, +2] (rank 0 -> -2, rank 1 -> +2). Gives the
-        #  95-strategy layer real influence on conviction instead of being a
-        #  no-op union of near-every candidate (see AUDIT_DIRECTIVES.md A4).
-        strat_votes = d.get("strat_votes")
-        if strat_votes is not None and not pd.isna(strat_votes):
-            sig["strat_votes"] = int(strat_votes)
-            if strat_pct is not None and sym in strat_pct.index:
-                pct = float(strat_pct.loc[sym])
-                sig["strat_signal"] = round(pct * 4.0 - 2.0, 2)
-                available_keys.append("w_strat")
-
-        sig["signals_available"] = len(available_keys)
-
-        # ── Composite Conviction (0–100) ─────────────────────────────────────
-        # Renormalize the active weights over only the AVAILABLE signals, so a
-        # universe where volume-dependent signals are structurally absent
-        # (FX/some futures report zero volume on Yahoo -> osc_signal and
-        # vap_signal are 0-by-default for every symbol, not because the
-        # market said "neutral") doesn't have its conviction range silently
-        # compressed toward 50 — the two live signals (RSI, MA) still span
-        # the full [-2,+2] raw range instead of being diluted by two
-        # structurally-dead weight slots (see AUDIT_DIRECTIVES.md A14).
-        avail_weight_sum = sum(w.get(k, 0.0) for k in available_keys)
-        if avail_weight_sum > 1e-9:
-            w_eff = {k: (w.get(k, 0.0) / avail_weight_sum if k in available_keys else 0.0)
-                     for k in DEFAULT_WEIGHTS}
-        else:
-            w_eff = w
-
-        raw = (
-            sig["rsi_signal"]    * w_eff.get("w_rsi", 0.0) +
-            sig["osc_signal"]    * w_eff.get("w_osc", 0.0) +
-            sig["zscore_signal"] * w_eff.get("w_z", 0.0)   +
-            sig["ma_signal"]     * w_eff.get("w_ma", 0.0)  +
-            sig["vap_signal"]    * w_eff.get("w_vap", 0.0) +
-            sig["strat_signal"]  * w_eff.get("w_strat", 0.0)
-        )
-        sig["conviction_score"] = round(max(0.0, min(100.0, (raw + 2.0) / 4.0 * 100.0)))
-        rows.append(sig)
-
-    conv_df = pd.DataFrame(rows)
-    merge_cols = [c for c in conv_df.columns if c not in result.columns or c == "symbol"]
-    merged = result.merge(conv_df[merge_cols], on="symbol", how="left")
-    if "conviction_score" in merged.columns:
-        merged["conviction_score"] = merged["conviction_score"].fillna(50)
-    return merged
-
-
 __all__ = [
     "MarketRegimeDetector",
     "RegimeResult",
@@ -796,5 +612,4 @@ __all__ = [
     "REGIME_DESCRIPTIONS",
     "REGIME_MIX_MAP",
     "get_regime_history_series",
-    "compute_conviction_signals",
 ]

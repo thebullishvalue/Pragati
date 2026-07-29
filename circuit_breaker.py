@@ -132,7 +132,7 @@ class CircuitBreaker:
             result = func(*args, **kwargs)
             self._on_success()
             return result
-        except Exception as e:
+        except Exception:
             self._on_failure()
             raise
     
@@ -141,12 +141,21 @@ class CircuitBreaker:
         with self._lock:
             self.success_count += 1
             self.last_success_time = time.time()
-            
+
             if self.state == CircuitState.HALF_OPEN:
                 # Recovery successful
                 self.state = CircuitState.CLOSED
                 self.failure_count = 0
                 self.half_open_calls = 0
+            elif self.state == CircuitState.CLOSED:
+                # The threshold counts CONSECUTIVE failures, not cumulative
+                # ones. Without this reset the counter only ever grew, and
+                # since the breaker is a process-lifetime singleton, five
+                # unrelated transients spread over hours of successful calls
+                # would trip it — the opposite of what a failure threshold is
+                # meant to detect. A success means the service is up, so the
+                # run of failures is over.
+                self.failure_count = 0
         
         # Log success (import here to avoid circular dependency)
         try:

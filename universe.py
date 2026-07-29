@@ -19,7 +19,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import io
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UNIVERSE DEFINITIONS
@@ -647,15 +647,15 @@ def render_universe_selector() -> Tuple[str, Optional[str]]:
     )
 
     if universe == "Currency":
-        # FX pairs report zero/NaN volume on Yahoo Finance, so every
-        # volume-dependent conviction signal (Oscillator, Z-Score, Value
-        # Area) is structurally unavailable for this universe — conviction
-        # scoring falls back to RSI + MA-alignment only (renormalized; see
-        # regime.compute_conviction_signals and AUDIT_DIRECTIVES.md A14).
+        # Curation is covariance-based and needs only a return series, so FX's
+        # missing volume does not disable it. What it does affect is the regime
+        # detector, whose oscillator, extremes and acceptance factors are all
+        # volume-derived — the regime read on this universe is therefore much
+        # thinner than on equities.
         st.warning(
-            "Currency pairs report no volume on Yahoo Finance, so the Oscillator, "
-            "Z-Score, and Value Area conviction signals are unavailable here — scoring "
-            "falls back to RSI + MA-alignment only.",
+            "Currency pairs report no volume on Yahoo Finance. Portfolio curation is "
+            "unaffected (it needs only returns), but the market-regime read relies on "
+            "volume-derived factors and will be far less reliable here.",
             icon="⚠️",
         )
 
@@ -666,9 +666,6 @@ def render_universe_selector() -> Tuple[str, Optional[str]]:
         index_options = get_index_options(universe)
         default_index = get_default_index(universe)
         default_idx = index_options.index(str(default_index)) if default_index in index_options else 0
-
-        label = "Select Index" if universe == "India Indexes" else "Select US Index"
-        help_text = "Select the index for constituent analysis"
 
         selected_index = st.selectbox(
             "Market Index",

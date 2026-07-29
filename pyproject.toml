@@ -1,7 +1,7 @@
 [project]
 name = "pragyam"
-version = "10.0.1"
-description = "Conviction-based portfolio curation for Indian equity markets: a six-signal blend (RSI, Oscillator, Z-Score, MA-alignment, volume-profile Value Area, and Strategy Endorsement) scored against a fixed eight-factor market-regime detector, with Bayesian calibration that learns five of the six conviction weights (per universe/index/regime-family) from forward returns and deploys only when a statistically significant edge over the default is demonstrated, a Broker Sync step that writes curated units into broker order JSONs, and an Analytics tab that tracks the curated book against a universe-matched benchmark — @thebullishvalue"
+version = "11.0.0"
+description = "Covariance-based portfolio curation over a fixed ETF universe: Hierarchical Risk Parity and Equal Weight allocators that select and weight entirely from the return covariance structure, with an eight-factor market-regime read for context, a Broker Sync step that writes curated units into broker order JSONs, and an Analytics tab tracking the book against both a universe-matched benchmark and an equal-weight shadow of the same holdings — @thebullishvalue"
 requires-python = ">=3.10"
 dependencies = [
     "streamlit>=1.28.0",
@@ -12,7 +12,6 @@ dependencies = [
     "scipy>=1.11.0",
     "scikit-learn>=1.3.0",
     "colorama>=0.4.6",
-    "optuna>=3.5.0",
     "requests>=2.31.0",
     "openpyxl>=3.1.2",
 ]
