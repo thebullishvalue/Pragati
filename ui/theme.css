@@ -43,6 +43,44 @@
     --border-active: rgba(212, 168, 83, 0.35);
     --border-subtle: rgba(255, 255, 255, 0.03);
 
+    /* ---- Type scale ----
+       Twelve steps. Before this existed the app declared 36 DISTINCT sizes
+       across 127 rules — eight of them crowded between 11.2px and 13.1px,
+       which is a continuum, not a hierarchy: differences that small read as
+       inconsistency rather than as rank.
+
+       Each step is a rank, so pick by ROLE and never by eye:
+         2xs  10.9  uppercase eyebrows, legend keys
+         xs   11.8  table headers, dense chrome
+         sm   13.1  table cells, data rows
+         base 14.1  captions, secondary body
+         md   15.2  body
+         lg   17.6  emphasised body, small headings
+         xl   20.8  sub-headings, card values
+         2xl  24.8  section headings
+         3xl  30.4  page headings
+         4xl  36.8  display
+         5xl  41.6  large display
+         6xl  48.0  hero
+
+       Steps are ~14% apart, which is the smallest gap that still reads as a
+       deliberate rank rather than a mistake. NOTE: iframes built in app.py
+       (the portfolio and head-to-head tables) are separate documents and do
+       NOT inherit these variables — they restate the literal rem values, so
+       any change here must be mirrored there. */
+    --fs-2xs: 0.68rem;
+    --fs-xs: 0.74rem;
+    --fs-sm: 0.82rem;
+    --fs-base: 0.88rem;
+    --fs-md: 0.95rem;
+    --fs-lg: 1.1rem;
+    --fs-xl: 1.3rem;
+    --fs-2xl: 1.55rem;
+    --fs-3xl: 1.9rem;
+    --fs-4xl: 2.3rem;
+    --fs-5xl: 2.6rem;
+    --fs-6xl: 3rem;
+
     /* ---- Ink ---- */
     --ink-primary: #F1F5F9;
     --ink-secondary: #94A3B8;
@@ -189,7 +227,7 @@ footer {
 .premium-header h1 {
     font-family: var(--display);
     font-weight: 800;
-    font-size: 3rem;
+    font-size: var(--fs-6xl);
     line-height: 1;
     letter-spacing: -0.03em;
     color: var(--ink-primary);
@@ -204,7 +242,7 @@ footer {
     right: 0;
     top: 0;
     font-family: var(--display-serif);
-    font-size: 2rem;
+    font-size: var(--fs-4xl);
     font-weight: 400;
     color: var(--amber-dim);
     opacity: 0.6;
@@ -213,7 +251,7 @@ footer {
 
 .premium-header .tagline {
     font-family: var(--data);
-    font-size: 0.7rem;
+    font-size: var(--fs-sm);
     font-weight: 500;
     color: var(--amber-dim);
     text-transform: uppercase;
@@ -487,7 +525,7 @@ footer {
 
 .section-hdr .text h3 {
     font-family: var(--display);
-    font-size: 1.05rem;
+    font-size: var(--fs-lg);
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -498,7 +536,7 @@ footer {
 
 .section-hdr .text .desc {
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     color: var(--ink-secondary);
     margin-top: 0.2rem;
     line-height: 1.4;
@@ -549,7 +587,7 @@ footer {
 
 .collapsible-header h4 {
     font-family: var(--display);
-    font-size: 0.85rem;
+    font-size: var(--fs-md);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -617,7 +655,6 @@ footer {
     display: flex;
     flex-direction: column;
 }
-
 
 /* Force the column row containing system-cards to stretch all columns
    to the height of the tallest card. Targets only Streamlit horizontal
@@ -698,7 +735,7 @@ footer {
 
 .system-card h3 {
     font-family: var(--display);
-    font-size: 1.05rem;
+    font-size: var(--fs-lg);
     font-weight: 700;
     letter-spacing: 0.08em;
     margin: 0 0 var(--sp-4) 0;
@@ -727,7 +764,7 @@ footer {
 
 .system-card p {
     font-family: var(--data);
-    font-size: 0.78rem;
+    font-size: var(--fs-base);
     color: var(--ink-secondary);
     line-height: 1.7;
     margin: 0 0 var(--sp-5) 0;
@@ -740,7 +777,7 @@ footer {
    paragraph wraps to a different number of lines. */
 .system-card .spec {
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     color: var(--ink-tertiary);
     line-height: 2;
     border-top: 1px solid var(--border);
@@ -977,7 +1014,7 @@ footer {
 .metric-card h4 {
     font-family: var(--data);
     color: var(--ink-tertiary);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.12em;
@@ -1003,7 +1040,7 @@ footer {
 
 .metric-card h2 {
     font-family: var(--display);
-    font-size: 1.85rem;
+    font-size: var(--fs-3xl);
     font-weight: 700;
     line-height: 1;
     margin: 0 0 var(--sp-2) 0;
@@ -1016,7 +1053,7 @@ footer {
 /* Equal-height columns defined above — DRY, single source */
 .metric-card .sub-metric {
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     color: var(--ink-secondary);
     margin: 0;
     line-height: 1.4;
@@ -1186,7 +1223,7 @@ footer {
     background: var(--bg-elevated);
     color: var(--ink-primary);
     font-family: var(--data);
-    font-size: 0.7rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     padding: var(--sp-2) var(--sp-3);
     border-radius: var(--r-sm);
@@ -1291,7 +1328,7 @@ footer {
 
 .signal-card .label {
     font-family: var(--data);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.14em;
     color: var(--ink-tertiary);
@@ -1301,7 +1338,7 @@ footer {
 
 .signal-card .value {
     font-family: var(--display);
-    font-size: 2.5rem;
+    font-size: var(--fs-5xl);
     font-weight: 800;
     line-height: 1;
     margin-bottom: var(--sp-3);
@@ -1313,7 +1350,7 @@ footer {
 
 .signal-card .subtext {
     font-family: var(--data);
-    font-size: 0.72rem;
+    font-size: var(--fs-sm);
     color: var(--ink-secondary);
     line-height: 1.6;
 }
@@ -1339,7 +1376,7 @@ footer {
     padding: 0.3rem 0.8rem;
     border-radius: var(--r-sm);
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1385,7 +1422,7 @@ footer {
     font-family: var(--display);
     color: var(--cyan);
     margin: 0 0 var(--sp-2) 0;
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -1394,7 +1431,7 @@ footer {
 .info-box p {
     color: var(--ink-secondary);
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--fs-base);
     line-height: 1.7;
     font-family: var(--data);
 }
@@ -1442,7 +1479,7 @@ footer {
     justify-content: space-between;
     align-items: baseline;
     font-family: var(--data);
-    font-size: 0.6rem;
+    font-size: var(--fs-xs);
     line-height: 1.8;
 }
 
@@ -1451,12 +1488,12 @@ footer {
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    font-size: 0.55rem;
+    font-size: var(--fs-2xs);
 }
 
 .spec-value {
     color: var(--ink-secondary);
-    font-size: 0.6rem;
+    font-size: var(--fs-xs);
     font-weight: 400;
     text-align: right;
 }
@@ -1519,7 +1556,7 @@ footer {
 
 .regime-name {
     font-family: var(--display);
-    font-size: 2.1rem;
+    font-size: var(--fs-4xl);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -1528,14 +1565,14 @@ footer {
 
 .regime-sub {
     font-family: var(--data);
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
     color: var(--ink-secondary);
     margin-bottom: var(--sp-6);
 }
 
 .regime-score {
     font-family: var(--data);
-    font-size: 1.2rem;
+    font-size: var(--fs-xl);
     font-weight: 600;
     color: var(--ink-primary);
     margin-bottom: var(--sp-6);
@@ -1647,7 +1684,7 @@ footer {
 
 .interp-title {
     font-family: var(--display);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -1672,7 +1709,7 @@ footer {
 
 .interp-body {
     color: var(--ink-secondary);
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
     line-height: 1.65;
     font-family: var(--data);
 }
@@ -1686,7 +1723,7 @@ footer {
     color: var(--ink-primary) !important;
     font-family: var(--display) !important;
     font-weight: 500;
-    font-size: 0.8rem;
+    font-size: var(--fs-base);
     letter-spacing: 0.04em;
     border-radius: 8px;
     padding: 0.6rem 1.75rem;
@@ -1733,7 +1770,7 @@ footer {
     background: transparent;
     font-family: var(--display);
     font-weight: 600;
-    font-size: 0.76rem;
+    font-size: var(--fs-base);
     padding: 14px 0;
     border-bottom: 2px solid transparent;
     transition: all 200ms;
@@ -1765,8 +1802,26 @@ footer {
     box-shadow: inset 0 0 0 1px var(--border);
     overflow: hidden;
     background: var(--glass);
-    margin: var(--sp-2) 0 var(--sp-4) 0;
+    /* NO margin here, for the same reason the stroke above is an inset ring.
+       Streamlit height-locks the element container to the figure and sets it
+       to overflow:auto, so a top margin pushed this box DOWN inside a container
+       it already exactly filled: scrollHeight became 328 against a 320 client
+       height and the bottom 8px was clipped — precisely where the rounded
+       corners and the inset ring are drawn. That is why every plot rounded on
+       top and came out cut square on the bottom. The spacing belongs on the
+       container, which is free to grow. */
+    margin: 0;
     transition: box-shadow 250ms ease;
+}
+
+/* Top gap only. The bottom is left to the 16px base gap so a plot binds to its
+   descriptor caption at exactly the same distance a table does — an sp-4 here
+   put the caption 32px under the plot but only 40px above the next section,
+   which reads as belonging to neither. Where no caption follows, the next
+   element is a section start and carries its own sp-6. */
+[data-testid="stElementContainer"]:has(.stPlotlyChart),
+[data-testid="element-container"]:has(.stPlotlyChart) {
+    margin: var(--sp-2) 0 0 0;
 }
 
 .stPlotlyChart:hover {
@@ -1810,6 +1865,114 @@ footer {
 [data-testid="element-container"]:has(.section-divider)
     + [data-testid="element-container"] .sidebar-title {
     margin-top: var(--sp-2) !important;
+}
+
+/* The tab bar opens a section, so it takes the section gap. This used to come
+   from a .section-divider rendered just above it, but that drew a rule directly
+   above the tab bar's own bottom rule — two lines 40px apart separating the
+   same two things. The divider is gone; the spacing it was carrying lives here,
+   where it belongs, and without it the header cards overlapped the tab bar.
+
+   sp-10 rather than sp-6 because the header cards overhang their container by
+   a few px, so the measured clear space lands at the app's 40px section
+   boundary rather than short of it. It also tightens on mobile with the token. */
+[data-testid="stMain"] [data-testid="stTabs"] {
+    margin-top: var(--sp-10);
+}
+
+/* ================================================================
+   Vertical rhythm — two gaps only
+   ----------------------------------------------------------------
+   sp-6  BETWEEN sections (a .sidebar-title, the primary button, or a
+         .system-spec card each begin one)
+   sp-2  WITHIN a section, binding a descriptor caption to the visual
+         it explains
+   Anything that starts a new section carries the sp-6; anything that
+   belongs to the element above it carries the sp-2. There is no third
+   gap, which is what keeps the sidebar, the result page and the tabs
+   reading as one hierarchy.
+
+   Streamlit's vertical block supplies a base gap between every element,
+   and it differs by region — MEASURED: 8px in the sidebar, 16px in the
+   main area. Section starts add margin on top of it, so:
+
+     sidebar section   8 + sp-6 = 32px   (.sidebar-title, button, card)
+     main-area caption     16 + 0 = 16px  (base gap already IS the sp-2 tier)
+     main-area section  16 + sp-6 = 40px  (caption -> .section-divider)
+
+   That is why the caption rule below sets 0 rather than sp-2: adding the
+   token on top of a 16px base would push a caption to 24px and break the
+   binding to the visual it explains. */
+/* ================================================================ */
+
+/* The card begins the sidebar's last section, so it takes the section gap
+   like any .sidebar-title does. It is raw markup inside a markdown
+   container, so the margin has to go on the ELEMENT CONTAINER; set on the
+   inner div it is overridden by Streamlit and computes to 0. */
+[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.system-spec),
+[data-testid="stSidebar"] [data-testid="element-container"]:has(.system-spec) {
+    margin-top: var(--sp-6) !important;
+}
+
+/* Descriptor captions belong to the chart or table directly above them,
+   so they take the WITHIN-section gap. Streamlit's default leaves them
+   floating midway between the visual and the next section, which reads
+   as though the caption introduces what follows rather than explaining
+   what precedes it. The element-container variant covers older
+   Streamlit builds. */
+[data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]),
+[data-testid="element-container"]:has([data-testid="stCaptionContainer"]) {
+    /* The main area's 16px base gap already is the within-section tier, so the
+       caption adds nothing and stays bound to the visual above it. The section
+       divider that follows adds sp-6, giving 40px below against 16px above —
+       the caption reads as explaining what precedes it, not introducing what
+       follows. */
+    margin-top: 0 !important;
+}
+
+/* Descriptor captions carry the reasoning for the visual above them, so they
+   have to be READ, not merely noticed. At 0.72rem/--ink-tertiary (#4B5563 on a
+   dark ground) they were technically present and practically unreadable.
+   0.82rem on --ink-secondary keeps them clearly subordinate to body copy while
+   staying legible. Matched by the inline descriptor in app.py's analytics tab
+   so every explanatory line in the app renders identically. */
+/* A caption after a ROW OF CARDS needs more than the 16px base gap. Plots and
+   the HTML tables sit in boxes with their own internal bottom padding, so the
+   ink-to-ink distance is comfortably more than the measured 16px. Metric cards
+   end on a hard border, so the same 16px puts the caption right against a solid
+   edge and it reads as glued to the row rather than as a note beneath it.
+   sp-2 on top restores the intended optical gap. */
+[data-testid="stLayoutWrapper"]
+    + [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]),
+[data-testid="stHorizontalBlock"]
+    + [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) {
+    margin-top: var(--sp-2) !important;
+}
+
+/* The mirror of the rule above. A caption belongs to the visual ABOVE it, so
+   anything following it starts a new section and takes the section gap. Where
+   that next thing is a card row with no divider or header to announce it, the
+   16px base gap alone left the caption equidistant between the plot it explains
+   and the cards it does not — reading as though it introduced them. */
+[data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"])
+    + [data-testid="stLayoutWrapper"],
+[data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"])
+    + [data-testid="stHorizontalBlock"] {
+    margin-top: var(--sp-6) !important;
+}
+
+[data-testid="stCaptionContainer"] p {
+    font-size: var(--fs-base) !important;
+    line-height: 1.7 !important;
+    color: var(--ink-secondary) !important;
+    margin-bottom: 0 !important;
+}
+
+/* A caption is the last thing in its section, so the divider that opens
+   the next section supplies the sp-6 — the caption must not add to it. */
+[data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"])
+    + [data-testid="stElementContainer"] .section-divider {
+    margin-top: var(--sp-6);
 }
 
 /* ================================================================
@@ -1870,7 +2033,7 @@ footer {
 
 .sidebar-title {
     font-family: var(--display);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     font-weight: 700;
     color: var(--ink-tertiary);
     text-transform: uppercase;
@@ -1890,7 +2053,7 @@ footer {
     border-radius: 8px !important;
     color: var(--ink-primary) !important;
     font-family: var(--data) !important;
-    font-size: 0.8rem !important;
+    font-size: var(--fs-base) !important;
     transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -1914,14 +2077,14 @@ footer {
 
 [data-testid="stDataFrame"] table {
     font-family: var(--data) !important;
-    font-size: 0.75rem !important;
+    font-size: var(--fs-base) !important;
 }
 
 [data-testid="stDataFrame"] th {
     background: linear-gradient(180deg, rgba(10, 14, 23, 0.95) 0%, rgba(10, 14, 23, 0.85) 100%) !important;
     color: var(--ink-tertiary) !important;
     font-family: var(--data) !important;
-    font-size: 0.62rem !important;
+    font-size: var(--fs-xs) !important;
     text-transform: uppercase;
     letter-spacing: 0.1em;
     font-weight: 600;
@@ -1960,14 +2123,14 @@ footer {
     width: 100%;
     border-collapse: collapse;
     font-family: var(--data);
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
 }
 
 /* Header row */
 .portfolio-table thead th {
     background: linear-gradient(180deg, rgba(10, 14, 23, 0.95) 0%, rgba(10, 14, 23, 0.85) 100%);
     color: var(--ink-tertiary);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -2040,7 +2203,7 @@ footer {
 .portfolio-table tbody td.symbol {
     font-weight: 700;
     color: var(--ink-primary);
-    font-size: 0.78rem;
+    font-size: var(--fs-base);
     letter-spacing: 0.02em;
 }
 
@@ -2212,7 +2375,7 @@ footer {
 
 .position-card-symbol {
     font-family: var(--display);
-    font-size: 1.1rem;
+    font-size: var(--fs-xl);
     font-weight: 700;
     color: var(--ink-primary);
     letter-spacing: 0.02em;
@@ -2226,7 +2389,7 @@ footer {
 
 .position-card-score {
     font-family: var(--data);
-    font-size: 1.25rem;
+    font-size: var(--fs-xl);
     font-weight: 700;
     color: var(--ink-primary);
     font-variant-numeric: tabular-nums;
@@ -2238,7 +2401,7 @@ footer {
     gap: 0.3rem;
     padding: 0.3rem 0.75rem;
     border-radius: 20px;
-    font-size: 0.72rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     font-family: var(--data);
     position: relative;
@@ -2292,7 +2455,7 @@ footer {
 
 .position-signal-label {
     font-family: var(--data);
-    font-size: 0.6rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -2301,7 +2464,7 @@ footer {
 
 .position-signal-value {
     font-family: var(--data);
-    font-size: 0.85rem;
+    font-size: var(--fs-md);
     font-weight: 500;
     color: var(--ink-secondary);
     font-variant-numeric: tabular-nums;
@@ -2331,13 +2494,13 @@ footer {
 
 .position-card-price {
     font-family: var(--data);
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
     color: var(--ink-secondary);
 }
 
 .position-card-weight {
     font-family: var(--data);
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
     color: var(--ink-secondary);
     font-weight: 600;
 }
@@ -2403,7 +2566,7 @@ footer {
     background: rgba(10, 14, 23, 0.9) !important;
     color: var(--ink-tertiary) !important;
     font-family: var(--data) !important;
-    font-size: 0.65rem !important;
+    font-size: var(--fs-xs) !important;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
@@ -2417,7 +2580,7 @@ footer {
     border-bottom: 1px solid var(--border-subtle) !important;
     padding: var(--sp-2) var(--sp-4) !important;
     font-family: var(--data) !important;
-    font-size: 0.75rem !important;
+    font-size: var(--fs-base) !important;
     text-align: left !important;
 }
 
@@ -2444,7 +2607,7 @@ footer {
 
 .progress-label {
     font-family: var(--display);
-    font-size: 0.8rem;
+    font-size: var(--fs-base);
     font-weight: 500;
     color: var(--ink-primary);
     display: flex;
@@ -2455,7 +2618,7 @@ footer {
 
 .progress-sub {
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     color: var(--ink-tertiary);
     margin-top: 0.35rem;
 }
@@ -2476,7 +2639,7 @@ footer {
 
 .progress-pct {
     text-align: right;
-    font-size: 0.65rem;
+    font-size: var(--fs-xs);
     color: var(--ink-tertiary);
     margin-top: 0.35rem;
     font-family: var(--data);
@@ -2558,7 +2721,7 @@ footer {
     font-family: var(--display);
     color: var(--amber);
     margin: 0 0 var(--sp-4) 0;
-    font-size: 0.9rem;
+    font-size: var(--fs-md);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.12em;
@@ -2579,7 +2742,7 @@ footer {
 .landing-prompt p {
     color: var(--ink-secondary);
     margin: 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-base);
     line-height: 1.8;
     font-family: var(--data);
     position: relative;
@@ -2616,7 +2779,7 @@ footer {
 
 .app-footer .content {
     font-family: var(--data);
-    font-size: 0.65rem;
+    font-size: var(--fs-xs);
     color: var(--ink-tertiary);
     letter-spacing: 0.04em;
 }
@@ -2633,7 +2796,7 @@ footer {
     background: var(--glass) !important;
     color: var(--ink-secondary) !important;
     font-family: var(--data) !important;
-    font-size: 0.75rem !important;
+    font-size: var(--fs-base) !important;
     font-weight: 500;
     border-radius: 8px;
     padding: 0.5rem 1.5rem;
@@ -2670,53 +2833,6 @@ footer {
 .stDownloadButton {
     position: relative;
     z-index: 1;
-}
-
-/* ================================================================
-   Chart Container Patterns — System-specific texture overlays
-   ================================================================ */
-.chart-container {
-    position: relative;
-    overflow: hidden;
-}
-
-.chart-container::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    opacity: 0.03;
-}
-
-.chart-container.portfolio::before {
-    background-image:
-        linear-gradient(rgba(212, 168, 83, 0.5) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(212, 168, 83, 0.5) 1px, transparent 1px);
-    background-size: 24px 24px;
-    opacity: 0.04;
-}
-
-.chart-container.regime::before {
-    background-image: repeating-linear-gradient(45deg,
-            rgba(34, 211, 238, 0.4) 0px,
-            rgba(34, 211, 238, 0.4) 1px,
-            transparent 1px,
-            transparent 12px);
-    opacity: 0.035;
-}
-
-.chart-container.strategies::before {
-    background-image:
-        repeating-linear-gradient(45deg, rgba(212, 168, 83, 0.4) 0px, rgba(212, 168, 83, 0.4) 1px, transparent 1px, transparent 10px),
-        repeating-linear-gradient(-45deg, rgba(212, 168, 83, 0.4) 0px, rgba(212, 168, 83, 0.4) 1px, transparent 1px, transparent 10px);
-    opacity: 0.03;
-}
-
-.chart-container.system::before {
-    background-image: radial-gradient(circle, rgba(148, 163, 184, 0.5) 1px, transparent 1px);
-    background-size: 16px 16px;
-    opacity: 0.05;
 }
 
 /* ================================================================
@@ -2777,13 +2893,13 @@ footer {
     font-weight: 700;
     text-transform: uppercase;
     font-family: var(--display);
-    font-size: 0.72rem;
+    font-size: var(--fs-sm);
     letter-spacing: 0.08em;
 }
 
 .warning-box .content {
     color: var(--ink-secondary);
-    font-size: 0.8rem;
+    font-size: var(--fs-base);
     line-height: 1.6;
     font-family: var(--data);
     margin-top: var(--sp-1);
@@ -2849,7 +2965,7 @@ footer {
     border-radius: var(--r-md);
     padding: var(--sp-3) var(--sp-4);
     font-family: var(--data);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     color: var(--ink-tertiary);
     opacity: 0;
     transform: translateY(8px);
@@ -2870,7 +2986,7 @@ footer {
     border-radius: 3px;
     padding: 1px 5px;
     font-family: var(--data);
-    font-size: 0.58rem;
+    font-size: var(--fs-2xs);
     color: var(--ink-secondary);
     margin: 0 2px;
 }
@@ -2921,7 +3037,7 @@ footer {
 
 .sidebar-hint-label {
     font-family: var(--data);
-    font-size: 0.6rem;
+    font-size: var(--fs-xs);
     color: var(--amber-dim);
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -2947,7 +3063,7 @@ footer {
    ================================================================ */
 .timeframe-btn {
     font-family: var(--data) !important;
-    font-size: 0.72rem !important;
+    font-size: var(--fs-sm) !important;
     font-weight: 500 !important;
     letter-spacing: 0.06em;
     padding: 0.45rem 0 !important;
@@ -2988,13 +3104,13 @@ footer {
 .lookback-row .label {
     font-family: var(--data);
     color: var(--ink-secondary);
-    font-size: 0.76rem;
+    font-size: var(--fs-base);
 }
 
 .lookback-row .value {
     font-weight: 600;
     font-family: var(--data);
-    font-size: 0.76rem;
+    font-size: var(--fs-base);
 }
 
 /* ================================================================
@@ -3013,7 +3129,7 @@ footer {
     border-radius: var(--r-sm);
     color: var(--ink-primary);
     font-family: var(--data);
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
     padding: var(--sp-2) var(--sp-3);
     outline: none;
     transition: border-color 200ms ease;
@@ -3048,7 +3164,7 @@ footer {
 
 @media (max-width: 1200px) {
     .premium-header h1 {
-        font-size: 2.2rem;
+        font-size: var(--fs-4xl);
     }
 
     .system-card {
@@ -3073,11 +3189,11 @@ footer {
     }
 
     .metric-card h2 {
-        font-size: 1.4rem;
+        font-size: var(--fs-2xl);
     }
 
     .signal-card .value {
-        font-size: 2rem;
+        font-size: var(--fs-4xl);
     }
 
     .stTabs [data-baseweb="tab-list"] {
@@ -3087,15 +3203,15 @@ footer {
 
 @media (max-width: 768px) {
     .premium-header h1 {
-        font-size: 1.8rem;
+        font-size: var(--fs-3xl);
     }
 
     .premium-header .tagline {
-        font-size: 0.6rem;
+        font-size: var(--fs-xs);
     }
 
     .section-hdr .text h3 {
-        font-size: 0.9rem;
+        font-size: var(--fs-md);
     }
 
     .metric-card {
@@ -3103,7 +3219,7 @@ footer {
     }
 
     .metric-card h2 {
-        font-size: 1.2rem;
+        font-size: var(--fs-xl);
     }
 
     .signal-card {
@@ -3111,7 +3227,7 @@ footer {
     }
 
     .signal-card .value {
-        font-size: 1.6rem;
+        font-size: var(--fs-3xl);
         flex-direction: column;
         gap: var(--sp-2);
     }
@@ -3121,7 +3237,7 @@ footer {
     }
 
     .system-card h3 {
-        font-size: 0.9rem;
+        font-size: var(--fs-md);
     }
 
     .stPlotlyChart {
@@ -3141,7 +3257,7 @@ footer {
     }
 
     .premium-header h1 {
-        font-size: 1.5rem;
+        font-size: var(--fs-2xl);
     }
 
     .section-hdr {
@@ -3159,15 +3275,15 @@ footer {
     }
 
     .metric-card h2 {
-        font-size: 1rem;
+        font-size: var(--fs-lg);
     }
 
     .signal-card .value {
-        font-size: 1.3rem;
+        font-size: var(--fs-xl);
     }
 
     .stTabs [data-baseweb="tab"] {
-        font-size: 0.65rem;
+        font-size: var(--fs-xs);
         padding: 10px 0;
     }
 
@@ -3459,31 +3575,6 @@ footer {
 }
 
 /* ================================================================
-   CHART CONTAINER ENHANCEMENTS
-   ================================================================ */
-
-.chart-container {
-    animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
-    position: relative;
-}
-
-.chart-container::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: var(--r-md);
-    background: linear-gradient(135deg, var(--amber-glow) 0%, transparent 50%, var(--cyan-glow) 100%);
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    pointer-events: none;
-    z-index: -1;
-}
-
-.chart-container:hover::before {
-    opacity: 0.3;
-}
-
-/* ================================================================
    LANDING PAGE ENHANCEMENTS
    ================================================================ */
 
@@ -3512,7 +3603,7 @@ footer {
 
 .landing-prompt h4 {
     font-family: var(--display);
-    font-size: 1.1rem;
+    font-size: var(--fs-xl);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -3598,14 +3689,14 @@ footer {
 .portfolio-table-2col th,
 .portfolio-table-2col td {
     padding: var(--sp-3) var(--sp-3);
-    font-size: 0.78rem;
+    font-size: var(--fs-base);
 }
 
 .portfolio-table-2col thead th {
     background: linear-gradient(180deg, rgba(10, 14, 23, 0.95) 0%, rgba(10, 14, 23, 0.85) 100%);
     color: var(--ink-tertiary);
     font-family: var(--display);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -3648,7 +3739,7 @@ div[data-multi-file-uploader] > div {
 }
 
 .iw-delta {
-    font-size: 0.65rem;
+    font-size: var(--fs-xs);
     font-weight: 400;
     opacity: 0.7;
     margin-left: 0.25rem;
@@ -3658,7 +3749,7 @@ div[data-multi-file-uploader] > div {
    searched by the calibrator) rather than merely unchanged this run — see
    the Strategy Endorsement (w_strat) row in the Active Weights table. */
 .iw-fixed {
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 400;
     opacity: 0.55;
     text-transform: uppercase;
@@ -3671,7 +3762,7 @@ div[data-multi-file-uploader] > div {
     text-align: right;
     margin-top: var(--sp-2);
     color: var(--ink-tertiary);
-    font-size: 0.7rem;
+    font-size: var(--fs-sm);
     font-family: var(--data);
     letter-spacing: 0.04em;
 }
@@ -3740,7 +3831,7 @@ div[data-multi-file-uploader] > div {
 
 .intel-method-title {
     font-family: var(--display);
-    font-size: 0.78rem;
+    font-size: var(--fs-base);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.14em;
@@ -3750,7 +3841,7 @@ div[data-multi-file-uploader] > div {
 
 .intel-method-pill {
     font-family: var(--data);
-    font-size: 0.68rem;
+    font-size: var(--fs-sm);
     color: var(--ink-secondary);
     padding: 0.35rem 0.85rem;
     border: 1px solid var(--border);
@@ -3761,7 +3852,7 @@ div[data-multi-file-uploader] > div {
 
 .intel-method-lede {
     color: var(--ink-secondary);
-    font-size: 0.82rem;
+    font-size: var(--fs-base);
     line-height: 1.7;
     font-family: var(--data);
     margin-bottom: var(--sp-5);
@@ -3831,7 +3922,7 @@ div[data-multi-file-uploader] > div {
 
 .intel-method-tile .tile-label {
     font-family: var(--display);
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.14em;
@@ -3842,7 +3933,7 @@ div[data-multi-file-uploader] > div {
 
 .intel-method-tile .tile-body {
     color: var(--ink-secondary);
-    font-size: 0.74rem;
+    font-size: var(--fs-base);
     line-height: 1.65;
     font-family: var(--data);
 }
@@ -3858,7 +3949,7 @@ div[data-multi-file-uploader] > div {
     padding: 0.08rem 0.4rem;
     border-radius: var(--r-sm);
     font-family: var(--data);
-    font-size: 0.72rem;
+    font-size: var(--fs-sm);
     letter-spacing: 0.02em;
 }
 
@@ -3996,17 +4087,6 @@ div[data-multi-file-uploader] > div {
    SCROLL-TRIGGERED ANIMATIONS (CSS-only with intersection observer via Streamlit)
    ================================================================ */
 
-@media (prefers-reduced-motion: no-preference) {
-
-    .metric-card,
-    .signal-card,
-    .system-card,
-    .section-hdr,
-    .chart-container {
-        will-change: transform, opacity;
-    }
-}
-
 /* ================================================================
    MOBILE PERFORMANCE — Reduce GPU load on small screens
    ================================================================ */
@@ -4099,7 +4179,7 @@ div[data-multi-file-uploader] > div {
     .metric-tooltip-text {
         max-width: 200px;
         right: -40px;
-        font-size: 0.6rem;
+        font-size: var(--fs-xs);
     }
 }
 
@@ -4118,11 +4198,11 @@ div[data-multi-file-uploader] > div {
     }
 
     .premium-header h1 {
-        font-size: 1.6rem !important;
+        font-size: var(--fs-3xl) !important;
     }
 
     .premium-header .tagline {
-        font-size: 0.55rem !important;
+        font-size: var(--fs-2xs) !important;
     }
 
     /* Reduce card minimum heights in landscape */
@@ -4132,7 +4212,7 @@ div[data-multi-file-uploader] > div {
     }
 
     .metric-card h2 {
-        font-size: 1.1rem !important;
+        font-size: var(--fs-xl) !important;
     }
 
     .system-card {
@@ -4167,15 +4247,14 @@ div[data-multi-file-uploader] > div {
     }
 
     .spec-row {
-        font-size: 0.55rem !important;
+        font-size: var(--fs-2xs) !important;
     }
 
-    .spec-label {
-        font-size: 0.5rem !important;
-    }
+    /* .spec-label needs no override: it is already --fs-2xs at every width,
+       and 2xs is the floor of the scale, so there is nothing to shrink to. */
 
     .spec-value {
-        font-size: 0.55rem !important;
+        font-size: var(--fs-2xs) !important;
     }
 }
 
@@ -4186,7 +4265,7 @@ div[data-multi-file-uploader] > div {
 
     /* Section headers not yet scaled */
     .section-hdr .text h3 {
-        font-size: 0.85rem !important;
+        font-size: var(--fs-md) !important;
     }
 
     /* System cards tighter */
@@ -4196,15 +4275,15 @@ div[data-multi-file-uploader] > div {
     }
 
     .system-card h3 {
-        font-size: 0.8rem !important;
+        font-size: var(--fs-base) !important;
     }
 
     .system-card p {
-        font-size: 0.7rem !important;
+        font-size: var(--fs-sm) !important;
     }
 
     .system-card .spec {
-        font-size: 0.6rem !important;
+        font-size: var(--fs-xs) !important;
     }
 
     /* Metric cards minimal */
@@ -4214,11 +4293,11 @@ div[data-multi-file-uploader] > div {
     }
 
     .metric-card h4 {
-        font-size: 0.55rem !important;
+        font-size: var(--fs-2xs) !important;
     }
 
     .metric-card h2 {
-        font-size: 1rem !important;
+        font-size: var(--fs-lg) !important;
     }
 
     /* Position guide tables */
@@ -4376,7 +4455,7 @@ div[data-multi-file-uploader] > div {
 .kv-table thead th {
     background: linear-gradient(180deg, rgba(10, 14, 23, 0.95) 0%, rgba(10, 14, 23, 0.85) 100%);
     color: #4B5563;
-    font-size: 0.62rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -4389,7 +4468,7 @@ div[data-multi-file-uploader] > div {
 .kv-table tbody td {
     padding: 0.75rem 0.75rem;
     color: #F1F5F9;
-    font-size: 0.75rem;
+    font-size: var(--fs-base);
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     font-family: 'IBM Plex Mono', monospace;
     vertical-align: middle;
@@ -4401,7 +4480,7 @@ div[data-multi-file-uploader] > div {
 
 .kv-table tbody td.key {
     font-weight: 700;
-    font-size: 0.78rem;
+    font-size: var(--fs-base);
     letter-spacing: 0.02em;
     font-family: 'Space Grotesk', sans-serif;
     color: #F1F5F9;
