@@ -1,0 +1,289 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BullishValue
+
+//@version=5
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SB v8 — CLOSE-LOCATION REVERSAL
+//
+//  WHAT THIS IS, AND WHY IT LOOKS NOTHING LIKE v3/v4/v5
+//  ────────────────────────────────────────────────────────────────────────────
+//  v3, v4 and v5 all measured intraday session breadth — cumulative bull effort
+//  versus bear effort — and all three concluded BULLS WINNING => BULLISH.
+//  Measured over 370,686 intraday bars on 82 datasets, none of them had any
+//  forward directional edge: 12-bar forward return of sign(score) was
+//  -0.005 / +0.006 / -0.003 ATR, every confidence interval straddling zero.
+//
+//  That was not a construction failure. 370,686 intraday bars is only ~601
+//  INDEPENDENT observations (26 symbols carry a participation ratio of 7.2
+//  independent ones; 59 trading days is a single regime). The smallest effect
+//  provable there is 0.114 ATR — bigger than most intraday edges ever get. So
+//  the search moved to where power exists: 39 instruments, 251,200 daily bars,
+//  1993-2026, spanning dot-com, GFC, ZIRP, COVID and the inflation cycle.
+//
+//  22 pre-declared features x 3 horizons = 66 tests, Bonferroni corrected,
+//  block-bootstrapped by date. Discovery 1993-2013; holdout 2014-2026 sealed
+//  and opened exactly once.
+//
+//  WHAT DIED
+//    sb_effort (avgBull - avgBear, the literal SB core, at daily scale)
+//        p_bonf = 1.00 at every horizon. Signs disagree between its own 21d and
+//        63d versions. The SB premise is flat where it can finally be measured.
+//    sb_breadth (count breadth)  p_bonf = 1.00 at every horizon.
+//    All five momentum variants, both MA-trend variants, overnight/intraday
+//        decomposition, volatility change, efficiency ratio: nothing survived.
+//
+//  WHAT LIVED
+//    sb_clv = ((close-low) - (high-close)) / (high-low)   -- where price closes
+//    inside its own daily range.  IC -0.0634, z -7.96, p_bonf 1.2e-13, the
+//    strongest result in the study by four orders of magnitude. NEGATIVE:
+//    a strong close predicts WEAKNESS. The SB family was pointed at roughly the
+//    right variable and had the SIGN BACKWARDS.
+//
+//  HOLDOUT (opened once, never tuned against)
+//    sb_clv h=1  IC -0.0251  p 3.5e-03   CONFIRMED
+//    sb_clv h=5  IC -0.0254  p 4.6e-04   CONFIRMED
+//
+//  THE EDGE IS SMALL AND DECAYING. Do not let the significance mislead you:
+//    1993-1999  IC -0.113        2014-2019  IC -0.025   <- holdout
+//    2000-2006  IC -0.065        2020-2026  IC -0.026   <- holdout
+//    2007-2013  IC -0.056
+//  Four times weaker than the 1990s, now stable at roughly a quarter of it.
+//
+//  DRIFT CONTROL — the test that matters most. With each instrument's own mean
+//  forward return removed within era, so "equities went up" cannot contribute:
+//    fade-long   discovery +0.0546 [+0.031,+0.078]   holdout +0.0534 [+0.028,+0.078]
+//    fade-short  discovery +0.0469 [+0.008,+0.085]   holdout +0.0094 [-0.030,+0.052]
+//  The LONG side is confirmed in both eras. The SHORT side is NOT confirmed out
+//  of sample, which is why this script treats them differently — see below.
+//
+//  COSTS DECIDE EVERYTHING, AND THE EVENT FORM IS WHY THIS IS TRADEABLE AT ALL.
+//  Holding a CONTINUOUS position on this signal turns over daily, costs 12%/yr
+//  at 3bp, and is fatal: net Sharpe -0.48. Firing only on |z|>1.5 (9.3% of days)
+//  and holding 10 days cuts turnover ~35x. Measured on the shipped logic:
+//    all 39 instruments,  3bp:  discovery NET +0.124   holdout NET +0.132
+//    US equity idx+sectors,3bp:                        holdout NET +0.430
+//  Cost breakeven is ~7bp pooled; on US equity indices and sectors it is still
+//  positive past 10bp. Turnover, not signal strength, was the binding
+//  constraint — and it is the one thing the event design actually fixes.
+//
+//  HOW TO TRADE IT — measured, not asserted
+//    HORIZON      5-10 trading days. There is NO intraday edge here. None was
+//                 found and none is claimed.
+//    ENTRY        next session's open after the signal day closes. Backtested
+//                 exactly this way (EXEC-B), because entering at the signal
+//                 close (EXEC-A) is not available to most traders and tests
+//                 barely different anyway.
+//    LONG SIGNAL  weak close (z < -1.5) -> expect mean reversion up.
+//                 Confirmed both eras. This is the tradeable side.
+//    SHORT SIGNAL strong close (z > +1.5) -> holdout drift-free +0.0094 with a
+//                 CI of [-0.030,+0.052]. It failed holdout confirmation. Treat it as "stop
+//                 adding to longs", NOT as "go short". The script labels it
+//                 CAUTION rather than a short entry for exactly this reason.
+//    SCOPE        Drift-free and holdout-confirmed ONLY on US equity indices
+//                 (+0.121, hit 57.5%, CI [+0.058,+0.183]) and US sectors
+//                 (+0.068, hit 54.9%, CI [+0.023,+0.111]).
+//                 India indices +0.089 but n=239 and the CI includes zero.
+//                 Commodities, FX, rates, credit and intl equity: all gone.
+//                 The dashboard states which case you are in. Believe it.
+//
+//  NON-REPAINTING BY CONSTRUCTION. The signal reads the PREVIOUS COMPLETED
+//  daily bar (z[1] inside the request.security expression with lookahead_on —
+//  the standard safe idiom). It cannot change once the day it refers to has
+//  closed. The forming day's value is shown separately and labelled FORMING;
+//  it is information only and is never used for a signal.
+//
+//  WHAT THIS SCRIPT WILL NOT DO
+//    - claim an intraday edge (there isn't one)
+//    - claim the short side works out of sample (it doesn't)
+//    - claim this works on your FX or gold chart (it doesn't)
+//    - hide that a 0.13-0.43 net Sharpe is an overlay, not a system
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("Close-Location Reversal", "CLR", overlay=false, max_labels_count=100)
+
+// ─────────────────────────────────────────────────────────────
+// Inputs — deliberately few. Every default is a measured plateau, not a fit.
+// ─────────────────────────────────────────────────────────────
+int    zLook   = input.int(252,  "Z-score lookback (daily bars)", minval=40, maxval=1000, tooltip="Measured plateau: net Sharpe stays positive in BOTH eras across 63-504. 252 is mid-plateau, not a fitted value.")
+float  thr     = input.float(1.5, "Signal threshold (sigma)", minval=0.5, maxval=3.0, step=0.1, tooltip="1.0 fires 44% of days and loses to costs. 2.0 fires 0.1% of days and failed holdout. 1.5 fires 9.3% of days and is net-positive in both eras.")
+int    horizon = input.int(10,   "Hold horizon (trading days)", minval=1, maxval=40, tooltip="Edge lives at 5-10 days. Below 5 the turnover cost exceeds the gross edge.")
+string iclass  = input.string("US index / ETF", "Instrument class", options=["US index / ETF","US sector ETF","India index","International equity","Commodity","FX","Rates / Credit","Other / unknown"], tooltip="Sets the measured out-of-sample expectancy shown in the panel. This is honesty wiring, not a parameter.")
+float  costBps = input.float(3.0, "Round-trip cost (bps)", minval=0.0, maxval=50.0, step=0.5, tooltip="Measured breakeven is ~7bp pooled across all 39 instruments; on US equity indices and sectors the event form is still net-positive past 10bp.")
+bool   showFrm = input.bool(true, "Show forming (non-tradeable) close location")
+
+color colorBull = #00E676
+color colorBear = #FF5252
+color colorNeut = #787B86
+color colorWarn = #FFA726
+color colorBg   = color.new(#131722, 10)
+
+// ─────────────────────────────────────────────────────────────
+// Core measurement, evaluated in the DAILY context.
+// clv = -1 when the day closes on its low, +1 when it closes on its high.
+// ─────────────────────────────────────────────────────────────
+f_clv() =>
+    float rng = high - low
+    rng > 0.0 ? ((close - low) - (high - close)) / rng : 0.0
+
+// `simple int` matters: a length routed through a function parameter otherwise
+// degrades to series, which ta.sma/ta.stdev reject at compile time.
+// Previous COMPLETED daily bar. This is the tradeable value.
+f_zPrev(simple int look) =>
+    float clv = f_clv()
+    float m   = ta.sma(clv, look)
+    float s   = ta.stdev(clv, look)
+    float z   = s > 0.0 ? (clv - m) / s : 0.0
+    z[1]
+
+// Currently forming daily bar. Information only — repaints intraday by nature.
+f_zNow(simple int look) =>
+    float clv = f_clv()
+    float m   = ta.sma(clv, look)
+    float s   = ta.stdev(clv, look)
+    s > 0.0 ? (clv - m) / s : 0.0
+
+// Bars of daily history available, so we can refuse to signal while warming up.
+f_dBars() =>
+    bar_index + 1
+
+float zPrev  = request.security(syminfo.tickerid, "D", f_zPrev(zLook), lookahead=barmerge.lookahead_on)
+float zNow   = request.security(syminfo.tickerid, "D", f_zNow(zLook),  lookahead=barmerge.lookahead_off)
+float dBars  = request.security(syminfo.tickerid, "D", f_dBars(),      lookahead=barmerge.lookahead_on)
+
+bool warmup  = na(zPrev) or na(dBars) or dBars < zLook + 2
+bool usable  = not warmup and not na(zPrev)
+
+// Positive = bullish. The sign flip IS the finding: a weak close is the buy.
+float fadeScore = usable ? -zPrev : float(na)
+
+// ─────────────────────────────────────────────────────────────
+// Signal state — evaluated once per NEW DAILY BAR, so an intraday chart does
+// not re-fire the same daily signal on every 5-minute bar.
+// ─────────────────────────────────────────────────────────────
+bool newDay = ta.change(time("D")) != 0
+
+var int   sinceSig = 9999      // daily bars since the last qualifying day
+var int   sigDir   = 0         // +1 fade-long, -1 fade-short(caution), 0 none
+
+bool fires = usable and math.abs(zPrev) > thr
+
+if newDay
+    if fires
+        sigDir   := zPrev < 0 ? 1 : -1
+        sinceSig := 0
+    else
+        sinceSig := sinceSig >= 9999 ? 9999 : sinceSig + 1
+
+bool active   = sinceSig <= horizon and sigDir != 0
+bool freshLng = newDay and fires and zPrev < 0
+bool freshShr = newDay and fires and zPrev > 0
+
+// ─────────────────────────────────────────────────────────────
+// Measured out-of-sample expectancy for the declared instrument class.
+// Holdout 2014-2026, 10-day horizon, entry next open, each instrument's own
+// drift removed. `established` = bootstrap CI excluded zero.
+// ─────────────────────────────────────────────────────────────
+float clsEdge = iclass == "US index / ETF"        ? 0.121 :
+   iclass == "US sector ETF"        ? 0.068 :
+   iclass == "India index"          ? 0.089 :
+   iclass == "International equity" ? 0.003 :
+   iclass == "Commodity"            ? 0.028 :
+   iclass == "FX"                   ? 0.035 :
+   iclass == "Rates / Credit"       ? -0.003 : 0.0
+
+float clsHit = iclass == "US index / ETF"        ? 57.5 :
+   iclass == "US sector ETF"        ? 54.9 :
+   iclass == "India index"          ? 51.9 :
+   iclass == "International equity" ? 53.2 :
+   iclass == "Commodity"            ? 51.0 :
+   iclass == "FX"                   ? 51.9 :
+   iclass == "Rates / Credit"       ? 51.1 : 50.0
+
+// Only these two had a bootstrap CI excluding zero after drift removal.
+bool established = iclass == "US index / ETF" or iclass == "US sector ETF"
+
+// Measured breakeven: ~7bp pooled; established classes stay positive past 10bp.
+bool costOK = costBps <= (established ? 10.0 : 7.0)
+
+// ─────────────────────────────────────────────────────────────
+// State label
+// ─────────────────────────────────────────────────────────────
+string stateStr = "NO EDGE CLAIMED"
+color  stateCol = colorNeut
+if warmup
+    stateStr := "WARMING UP"
+    stateCol := colorNeut
+else if active and sigDir == 1
+    stateStr := "FADE LONG"
+    stateCol := colorBull
+else if active and sigDir == -1
+    stateStr := "CAUTION (not a short)"
+    stateCol := colorWarn
+else
+    stateStr := "NEUTRAL"
+    stateCol := colorNeut
+
+// ─────────────────────────────────────────────────────────────
+// Plots
+// ─────────────────────────────────────────────────────────────
+// hline() requires a const/input price. `-thr` is a computed expression, so the
+// trigger bands are drawn with plot(), which accepts series.
+hline(0, "Zero", color=color.new(color.white, 82), linestyle=hline.style_solid)
+plot(thr,  "Long trigger",    color=color.new(colorBull, 55), linewidth=1)
+plot(-thr, "Caution trigger", color=color.new(colorWarn, 55), linewidth=1)
+
+color traceCol = not usable ? color.new(colorNeut, 40) :
+   fadeScore >  thr ? colorBull :
+   fadeScore < -thr ? colorWarn : colorNeut
+
+plot(usable ? fadeScore : float(na), "Fade Score", color=traceCol, linewidth=2, style=plot.style_line)
+plot(showFrm and not na(zNow) ? -zNow : float(na), "Forming (not tradeable)", color=color.new(colorNeut, 55), linewidth=1, style=plot.style_stepline)
+
+// Shade the active holding window so the 5-10 day horizon is visible, not implied.
+bgcolor(active and sigDir == 1  ? color.new(colorBull, 92) : na, title="Fade-long window")
+bgcolor(active and sigDir == -1 ? color.new(colorWarn, 93) : na, title="Caution window")
+
+plotshape(freshLng, "Fade-long signal", style=shape.triangleup, location=location.bottom, color=colorBull, size=size.tiny)
+plotshape(freshShr, "Caution signal",   style=shape.diamond,    location=location.top,    color=colorWarn, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────
+// Dashboard — 9 rows. Every number is measured; none is asserted.
+// ─────────────────────────────────────────────────────────────
+dRow(tb, r, lbl, val, vcol) =>
+    table.cell(tb, 0, r, lbl, text_color=color.new(color.white, 30), text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 1, r, val, text_color=vcol, text_size=size.small, text_halign=text.align_right)
+
+dBand(tb, r, lbl, val, vcol) =>
+    table.cell(tb, 0, r, lbl, text_color=vcol, text_size=size.small, text_halign=text.align_left,  bgcolor=color.new(vcol, 85))
+    table.cell(tb, 1, r, val, text_color=vcol, text_size=size.small, text_halign=text.align_right, bgcolor=color.new(vcol, 85))
+
+string winTxt = active ? "day " + str.tostring(sinceSig) + " of " + str.tostring(horizon) : (sinceSig < 9999 and usable ? "expired" : "-")
+string frmTxt = na(zNow) ? "-" : str.tostring(-zNow, "#.##") + "  (forming)"
+string scopeTxt = established ? "validated out-of-sample" : "NOT established for this class"
+color  scopeCol = established ? colorBull : colorWarn
+string edgeTxt = str.tostring(clsEdge, "#.###") + " vol · " + str.tostring(clsHit, "#.#") + "% hit"
+color  edgeCol = clsEdge > 0.05 ? colorBull : clsEdge > 0.0 ? colorNeut : colorBear
+string costTxt = str.tostring(costBps, "#.#") + " bp · " + (costOK ? "net +" : "NET NEGATIVE")
+color  costCol = costOK ? colorBull : colorBear
+
+var table t = table.new(position.top_right, 2, 9, border_width=0, frame_width=1, frame_color=colorBg, bgcolor=colorBg)
+
+if barstate.islast
+    table.cell(t, 0, 0, "SB v8 · CLOSE-LOC REVERSAL", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 0, "DAILY · 5-10d", text_color=color.new(color.white, 30), text_size=size.small, text_halign=text.align_right)
+
+    dBand(t, 1, stateStr, usable ? str.tostring(fadeScore, "#.##") : "-", stateCol)
+    dRow(t, 2, "Close location z", usable ? str.tostring(zPrev, "#.##") + "  (confirmed)" : "warming up", usable ? color.new(color.white, 20) : colorNeut)
+    dRow(t, 3, "Today", showFrm ? frmTxt : "hidden", colorNeut)
+    dRow(t, 4, "Hold window", winTxt, active ? stateCol : colorNeut)
+    dRow(t, 5, "Class edge (OOS)", edgeTxt, edgeCol)
+    dRow(t, 6, "Scope", scopeTxt, scopeCol)
+    dRow(t, 7, "Cost gate", costTxt, costCol)
+    dRow(t, 8, "Entry", "next session open", color.new(color.white, 30))
+
+// ─────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────
+alertcondition(freshLng, "SB v8 — Fade long (weak close)", "Weak daily close, z below threshold. Mean-reversion long, enter next open, hold 5-10 days.")
+alertcondition(freshShr, "SB v8 — Caution (strong close)", "Strong daily close, z above threshold. Reduce long exposure. NOT a short signal: short side failed holdout confirmation.")

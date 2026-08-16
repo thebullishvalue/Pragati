@@ -169,8 +169,8 @@ def ledoit_wolf(R: np.ndarray) -> np.ndarray:
     A sample covariance over ~30 assets from ~250 observations is badly
     conditioned, and every allocator that inverts it amplifies that error into
     wild weights. Shrinkage is the standard fix and is applied to the allocators
-    below that need a well-conditioned matrix (ERC, Max Diversification), so
-    neither is handicapped by estimator noise it did not have to carry.
+    below that need a well-conditioned matrix, so none is handicapped by
+    estimator noise it did not have to carry.
     """
     T, N = R.shape
     S = np.cov(R, rowvar=False)
@@ -230,47 +230,6 @@ def erc_weights(cov: np.ndarray) -> np.ndarray:
             break
     s = x.sum()
     return x / s if s > 1e-12 else np.full(n, 1.0 / n)
-
-
-def _project_simplex(v: np.ndarray) -> np.ndarray:
-    """Euclidean projection onto the probability simplex (Duchi et al. 2008)."""
-    n = len(v)
-    u = np.sort(v)[::-1]
-    css = np.cumsum(u)
-    idx = np.nonzero(u * np.arange(1, n + 1) > (css - 1.0))[0]
-    rho = idx[-1] if len(idx) else 0
-    theta = (css[rho] - 1.0) / (rho + 1.0)
-    return np.clip(v - theta, 0.0, None)
-
-
-def max_diversification_weights(cov: np.ndarray) -> np.ndarray:
-    """Maximum Diversification (Choueifaty & Coignard 2008).
-
-    Maximises the ratio of weighted-average volatility to portfolio volatility.
-    Solved as a long-only minimum-variance problem on the CORRELATION matrix,
-    then rescaled by 1/sigma — which avoids an explicit inverse.
-
-    MEASURED: the strongest lump-sum result in the program (Nifty 50, +4.49%/yr
-    vs equal weight at t = 3.41) but it lost EVERY one of 115 five-year SIP
-    streams, because its edge is beta reduction and a SIP accumulating through a
-    rising market is hurt by low beta. Shipped as a capital-preservation style,
-    not as a return style. See METHODS metadata.
-    """
-    n = cov.shape[0]
-    if n == 0:
-        return np.zeros(0)
-    if n == 1:
-        return np.ones(1)
-    sd = np.sqrt(np.clip(np.diag(cov), 1e-20, None))
-    corr = cov / np.outer(sd, sd)
-    w = np.full(n, 1.0 / n)
-    L = float(np.linalg.eigvalsh(corr).max()) or 1.0
-    step = 1.0 / (2.0 * L)
-    for _ in range(4000):
-        w = _project_simplex(w - step * (2.0 * (corr @ w)))
-    w = w / np.clip(sd, 1e-20, None)
-    s = w.sum()
-    return w / s if s > 1e-12 else np.full(n, 1.0 / n)
 
 
 def momentum_scores(prices: pd.DataFrame, lookback: int = 252,
@@ -415,8 +374,8 @@ METHOD_SPECS = {
         "rc_target": "none",
         "evidence": ("The default because nothing beat it. Across 36 candidate allocators "
                      "on three universes, no method delivered a reproducible return "
-                     "improvement: ERC -0.51%/yr and Max Diversification +0.86%/yr on "
-                     "Nifty 50, both negative on Dow 30. Lowest turnover of any style."),
+                     "improvement: ERC gave up 0.51%/yr on Nifty 50 and 1.48% on Dow 30. "
+                     "Lowest turnover of any style."),
         "sip_default": True,
     },
     "ERC": {
@@ -450,21 +409,6 @@ METHOD_SPECS = {
                      "turnover and beats HRP on any-date in every cell tested."),
         "sip_default": False,
     },
-    "MAXDIV": {
-        "label": "Max Diversification",
-        "short": "MAXDIV",
-        "family": "preservation",
-        "formula": "maximise (w . sigma) / sqrt(w' Cov w)",
-        "tagline": "Maximises the diversification ratio; lowest beta of the set",
-        "uses_clusters": False,
-        "uses_momentum": False,
-        "rc_target": "none",
-        "evidence": ("The strongest lump-sum result measured (Nifty 50, +4.49%/yr alpha vs "
-                     "equal weight at t = 3.41, beta 0.80) but it lost ALL 115 five-year "
-                     "SIP streams — its edge is beta reduction, which hurts an investor "
-                     "still accumulating. For lump-sum capital near a goal date, not a SIP."),
-        "sip_default": False,
-    },
     # ── Implemented, deliberately NOT surfaced in the UI ─────────────────────
     # ERC + momentum was carried as the lead ship candidate until a defect was
     # found in the ERC solver (it renormalised inside the descent loop, so it
@@ -494,7 +438,7 @@ METHOD_SPECS = {
 # Selectable styles, in display order: the default first, then the
 # risk-reduction family ordered by how well it does its job per unit of trading.
 # ERC_MOM is implemented but intentionally absent — see its spec above.
-METHOD_ORDER = ("EQUAL", "ERC", "HRP", "MAXDIV")
+METHOD_ORDER = ("EQUAL", "ERC", "HRP")
 METHODS = METHOD_ORDER
 
 # Momentum tilt strength. 0.5 is the measured setting; the parameter surface is
@@ -592,7 +536,19 @@ def build_returns_matrix(history: List[Tuple[object, pd.DataFrame]],
     keep = [c for c in rets.columns if cover[c] >= MIN_COVERAGE * len(rets)]
     if not keep:
         return pd.DataFrame()
-    return rets[keep].dropna(how="any")
+    out = rets[keep].dropna(how="any")
+    # Record WHAT was dropped and by how much, so a book built on fewer names
+    # than the declared universe can be explained rather than guessed at. A
+    # recently listed ETF cannot have a 252-day covariance estimate; excluding
+    # it is correct, but it should never be silent.
+    out.attrs["excluded"] = {
+        c: {"obs": int(cover[c]), "window": int(len(rets)),
+            "coverage": float(cover[c] / len(rets))}
+        for c in rets.columns if c not in keep
+    }
+    out.attrs["coverage_window"] = int(len(rets))
+    out.attrs["coverage_required"] = float(MIN_COVERAGE)
+    return out
 
 
 def build_price_matrix(history: List[Tuple[object, pd.DataFrame]],
@@ -684,9 +640,6 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
         w = np.full(len(names), 1.0 / len(names))
     elif _m == "HRP":
         w = hrp_weights(cov, corr)
-    elif _m == "MAXDIV":
-        solver_cov = ledoit_wolf(R)
-        w = max_diversification_weights(solver_cov)
     elif _m in ("ERC", "ERC_MOM"):
         solver_cov = ledoit_wolf(R)
         w = erc_weights(solver_cov)
@@ -719,10 +672,18 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
                        if np.mean(_rc_solved) > 1e-18 else 0.0)
 
     ser = pd.Series(w, index=names).sort_values(ascending=False)
-    # Drop names the allocator zeroed out BEFORE selecting. Minimum-variance in
-    # particular returns corner solutions — most names at exactly 0 — and
-    # carrying those into the top-N selection would fill the book with
-    # zero-weight rows that the cap logic then has to reason about.
+    # Drop names the allocator zeroed out BEFORE selecting. Corner-solution
+    # optimisers (minimum variance, maximum diversification) put most names at
+    # exactly 0, and carrying those into the top-N selection would fill the book
+    # with zero-weight rows that the cap logic then has to reason about.
+    #
+    # This is also why Max Diversification was withdrawn as a shipped style: it
+    # routinely zeroed enough names that the book came back SHORTER than the
+    # position count the user asked for (10 of a requested 15 on this universe).
+    # A style that silently re-decides how many positions you hold is not a
+    # weighting method. `nco_positions_short` below makes any recurrence visible
+    # rather than silent.
+    n_nonzero = int((ser > 1e-9).sum())
     ser = ser[ser > 1e-9]
     if ser.empty:
         return empty
@@ -804,6 +765,26 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
                                       if len(_rc_sel) and np.mean(_rc_sel) > 1e-18 else 0.0)
     out.attrs["nco_rc_dispersion_solved"] = float(_rc_solved_disp)
     out.attrs["nco_rc_concentration"] = float(rc.max() * n) if n else 1.0
+    # Position-count contract: the book must hold exactly what the user asked
+    # for, unless the ELIGIBLE UNIVERSE itself is smaller. `nco_positions_short`
+    # separates the two causes — a short book because the universe ran out is a
+    # data condition the user can act on; a short book because the allocator
+    # zeroed names out is an allocator defect.
+    # Universe eligibility, carried through so the UI can say why the book was
+    # built from fewer names than the universe declares.
+    _excl = rets.attrs.get("excluded", {})
+    out.attrs["nco_universe_requested"] = int(n_assets + len(_excl))
+    out.attrs["nco_universe_excluded"] = dict(_excl)
+    out.attrs["nco_coverage_required"] = float(rets.attrs.get("coverage_required", MIN_COVERAGE))
+    out.attrs["nco_coverage_window"] = int(rets.attrs.get("coverage_window", len(rets)))
+    out.attrs["nco_positions_requested"] = int(num_positions)
+    out.attrs["nco_positions_delivered"] = int(len(out))
+    out.attrs["nco_positions_nonzero"] = int(n_nonzero)
+    out.attrs["nco_positions_short"] = max(0, int(num_positions) - int(len(out)))
+    out.attrs["nco_short_cause"] = (
+        "none" if len(out) >= num_positions
+        else "universe" if n_assets <= num_positions or n_nonzero >= num_positions
+        else "allocator_zeroed")
     out.attrs["nco_momentum_names"] = int(_mom_sel.notna().sum())
     out.attrs["nco_momentum_lambda"] = (float(MOMENTUM_LAMBDA)
                                         if _spec["uses_momentum"] else 0.0)
@@ -835,7 +816,6 @@ __all__ = [
     "risk_contributions",
     "hrp_weights",
     "erc_weights",
-    "max_diversification_weights",
     "momentum_scores",
     "rank_z",
     "apply_momentum_tilt",

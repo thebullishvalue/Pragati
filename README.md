@@ -98,7 +98,6 @@ streamlit run app.py
 | **Equal Weight** *(default)* | baseline | Identical `1/N` per holding. The default because nothing beat it — see below. Lowest turnover of any style. |
 | **Equal Risk Contribution** | preservation | Solves so every holding contributes the same share of portfolio variance. The preferred risk-reduction style: beats HRP on the any-date hit rate in 6 of 6 cells across two stock universes while trading ~5× less. |
 | **Risk Parity (HRP)** | preservation | Clusters by correlation distance, then splits capital by recursive bisection on cluster variance. Inverts no matrix. Same job as ERC at five times the turnover; kept for continuity. |
-| **Max Diversification** | preservation | Maximises the diversification ratio. Lowest beta of the set and the strongest lump-sum result measured — but it lost every SIP stream tested. |
 
 Every style travels the identical pipeline — same eligibility filter, same
 clustering diagnostics, same risk decomposition — so any difference on screen is
@@ -115,13 +114,21 @@ method with a reproducible return improvement over `1/N`**:
   Equal Weight        —           —           —          0.12x
   ERC               +0.26%      -0.51%      -1.48%       0.26x
   Risk Parity       -1.33%      -1.08%      -2.94%       1.31x
-  Max Diversif.     +0.35%      +0.86%      -0.51%       1.19x
 ```
 
 What *does* reproduce is the ordering **among the risk-reduction styles**: ERC
 beats HRP on the any-date hit rate in every cell tested, on both stock
 universes, at a fifth of the turnover. That is a real improvement to the risk
 leg — which the rest of this README has always said is the leg that reproduces.
+
+**Position-count contract.** Every shipped style returns exactly the number of
+positions you select. Max Diversification was evaluated, measured well on
+lump-sum risk metrics, and **withdrawn anyway**: it is a corner-solution
+optimiser that drives most weights to exactly zero, so it returned 10 holdings
+when 15 were requested. A style that silently re-decides how many positions you
+hold is not a weighting method. `nco_positions_short` and `nco_short_cause` now
+record any shortfall and distinguish "the eligible universe ran out" (a data
+condition) from "the allocator zeroed names" (a defect).
 
 > **Correction (v11.1).** An earlier build of this analysis reported ERC and an
 > ERC+momentum tilt beating Equal Weight in 98–100% of five-year SIP streams.

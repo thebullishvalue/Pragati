@@ -832,6 +832,21 @@ def _render_system_tab(training_window: List):
             + (" · target 0.000" if _spec["rc_target"] == "equal" else " · not targeted")
             if _disp is not None else "—"),
         "Risk Concentration": f"{_at.get('nco_rc_concentration', 0):.2f}x equal share",
+        "Positions": (
+            f"{_at.get('nco_positions_delivered', 0)} of "
+            f"{_at.get('nco_positions_requested', '-')} requested"
+            + ("" if not _at.get("nco_positions_short")
+               else f" - {_at['nco_positions_short']} short ("
+                    + ("eligible universe exhausted"
+                       if _at.get("nco_short_cause") == "universe"
+                       else "allocator zeroed names") + ")")),
+        "Universe": (
+            f"{_at.get('nco_universe', 0)} eligible"
+            + (f" of {_at['nco_universe_requested']} in universe"
+               if _at.get("nco_universe_requested") else "")
+            + (f" · {len(_at.get('nco_universe_excluded') or {})} excluded"
+               f" (<{_at.get('nco_coverage_required', 0.8):.0%} history)"
+               if _at.get("nco_universe_excluded") else "")),
         "Estimation Window": f"{_at.get('nco_obs', 0)} daily observations",
         "Ex-ante Volatility": f"{_at.get('nco_port_vol_ann', 0):.2%}",
         "Max Position": f"{_max_eff*100:.1f}%" + (" (relaxed)" if _max_relaxed else ""),
@@ -894,12 +909,7 @@ def _render_system_tab(training_window: List):
                                     'between sub-clusters in inverse proportion to their variance. '
                                     'No matrix is inverted, which is what makes it robust when '
                                     'correlations are high and the sample is short.'),
-                            "MAXDIV": ('Maximum Diversification: maximises the ratio of weighted '
-                                       'average volatility to portfolio volatility. Solved on the '
-                                       'correlation matrix by projected gradient, then rescaled by '
-                                       '<code>1/&sigma;</code>. Produces the lowest beta of the set '
-                                       'and, by design, concentrated books.'),
-                          }.get(_m_spec["short"] if _m_spec["short"] in ("ERC", "HRP", "MAXDIV", "EQUAL")
+                          }.get(_m_spec["short"] if _m_spec["short"] in ("ERC", "HRP", "EQUAL")
                                 else "EQUAL", _m_spec["formula"])
                     + '</div>'
                 '</div>'
@@ -1909,7 +1919,6 @@ def _run_analysis(
                 "EQUAL":  ("Measuring Risk Structure", "1/N · clustering for diagnostics only"),
                 "ERC":    ("Solving Equal Risk Contribution", "cyclical coordinate descent"),
                 "HRP":    ("Clustering Risk Structure", "correlation-distance hierarchy"),
-                "MAXDIV": ("Maximising Diversification Ratio", "projected gradient, long-only"),
             }.get(_method, ("Measuring Risk Structure", _spec["formula"]))
             progress_bar(progress_container, 40, _stage40[0],
                          f"{_spec['short']} · {_stage40[1]}")
@@ -1973,6 +1982,19 @@ def _run_analysis(
             log.item("Weight formula", _spec["formula"])
             log.item("Estimation", f"{_book.attrs.get('nco_obs', 0)} daily observations · "
                                    f"{_book.attrs.get('nco_universe', 0)} symbols")
+            # Name every symbol the coverage rule dropped. A book built on 28 of
+            # 30 ETFs is correct when two of them listed this year, but it must
+            # never be left to the reader to work that out.
+            _excl = _book.attrs.get("nco_universe_excluded") or {}
+            if _excl:
+                log.item("Universe",
+                         f"{_book.attrs.get('nco_universe', 0)} of "
+                         f"{_book.attrs.get('nco_universe_requested', 0)} eligible · "
+                         f"{len(_excl)} excluded below "
+                         f"{_book.attrs.get('nco_coverage_required', 0.8):.0%} history")
+                for _sym, _d in sorted(_excl.items(), key=lambda kv: kv[1]["coverage"]):
+                    log.item(f"  excluded {_sym}",
+                             f"{_d['obs']}/{_d['window']} obs ({_d['coverage']:.0%})")
             log.item("Clustering", f"{_book.attrs.get('nco_clusters', 0)} clusters "
                                    f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})"
                                    + ("" if _spec["uses_clusters"] else " · diagnostic only"))
@@ -2084,8 +2106,6 @@ def main():
             "Weighting Method",
             options=_STYLE_LABELS,
             index=0,                      # Equal Weight — nothing measured beat it
-            format_func=lambda lbl: (
-                f"{lbl}  ·  {METHOD_SPECS[_NCO_STYLES[lbl]]['family']}"),
             help=(
                 "Every style selects and weights entirely from the return covariance "
                 "structure — no return forecast is made anywhere.\n\n"
@@ -2100,17 +2120,15 @@ def main():
                 "**Risk Parity (HRP)** — clusters by correlation, splits capital by "
                 "recursive bisection. Same job as ERC but five times the turnover; kept "
                 "for continuity.\n\n"
-                "**Max Diversification** — the lowest-beta style and the strongest "
-                "lump-sum result measured (Nifty 50 alpha t = 3.41), but it lost all 115 "
-                "five-year SIP streams tested. Suits lump-sum capital near a goal date, "
-                "not monthly accumulation.\n\n"
+                "Every style returns exactly the number of positions you select. "
+                "Max Diversification was evaluated and withdrawn: it is a corner-solution "
+                "optimiser that zeroes names out, so it returned 10 holdings when 15 were "
+                "requested.\n\n"
                 "If you are maximising absolute return without leverage, Equal Weight "
                 "remains the correct choice."
             ),
             label_visibility="visible"
         )
-        _sel_spec = METHOD_SPECS[_NCO_STYLES[investment_style]]
-        st.caption(f"{_sel_spec['tagline']} · `{_sel_spec['formula']}`")
 
         # 3. Analysis Universe
         st.markdown('<div class="sidebar-title">Analysis Universe</div>', unsafe_allow_html=True)

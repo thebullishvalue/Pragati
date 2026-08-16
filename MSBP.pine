@@ -1,0 +1,1342 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//  MSBP · Micro-Structure Body Pressure
+//  ------------------------------------------------------------------------------------
+//  Candle-body geometry treated as a per-bar variance-ratio estimator, normalized against
+//  an empirically calibrated null, separated by side, conditioned on auction context, and
+//  resolved into a hysteretic market-state machine with on-chart self-validation.
+//
+//  DESIGN CONTRACT
+//    · Direction and confidence are computed and displayed SEPARATELY. Never merged.
+//    · Bull and bear pressure are accumulated SEPARATELY. Never netted before display.
+//    · Every efficiency null is CALIBRATED from trailing data, never hard-coded.
+//    · Body magnitude is ranked WITHIN ITS OWN SIDE (leverage-effect correction).
+//    · Intraday features are normalized PER TIME-OF-DAY SLOT (anti-clock correction).
+//    · Nothing here measures order flow. Directional volume is labeled EDV (Estimated).
+//
+//  REPAINT POSTURE
+//    · No request.* call uses lookahead_on. No negative history offsets anywhere.
+//    · HTF bias offers a confirmed-only mode (offset 1) — ON by default.
+//    · The developing value area updates within the session BY DESIGN. That is real-time
+//      information, not lookahead: historical bars show the value area as it stood on
+//      that bar, so visual review is honest.
+//    · No pivot-based signal is used for state entry.
+//
+//  VALIDATION  ·  75 series · 14 instruments · 6 asset classes · 5 timeframes · 259,515 bars
+//  ------------------------------------------------------------------------------------
+//  Verified against a Python port (msbp_ref.py) run bar-by-bar on real data.
+//
+//  PASSED
+//    · Causality: recomputing on a truncated prefix reproduces every value at the cut
+//      bar exactly. No lookahead anywhere.
+//    · Bounds, NaN leakage, determinism: clean on all 259,515 bars.
+//    · State machine: 0 violations of dwell, hysteresis or the legal-transition graph
+//      across 39,909 transitions.
+//    · Value area: VAL <= POC <= VAH always; VA encloses >= 70% of volume always.
+//    · CLV == bodyEff + wickAsym to 1.1e-16. The identity is exact, as claimed.
+//    · Excess volume is decorrelated from range (r = 0.017) — the residual works.
+//    · Slot normalization cuts between-slot dispersion of the side-rank by 56%.
+//
+//  CLAIMS THAT DID NOT SURVIVE — corrected in place, listed here so they are not re-made
+//    · "Efficiency and magnitude are different axes entirely." FALSE.
+//      dvsRel and magRank correlate at r = 0.87. Both are driven by |body|, and when
+//      range ≈ ATR they are near-monotone transforms of each other. They are ONE axis.
+//    · "RWA is the rigorous wick feature, superior to an ad-hoc ratio." NOT USEFUL.
+//      RWA correlates 0.95 with plain (dnWick − upWick)/range. The Rogers-Satchell
+//      derivation is cleaner in theory and adds no independent information. Diagnostic only.
+//    · "Down bars carry systematically larger bodies and volume." REAL BUT SMALL.
+//      Equity down-bodies are 2.6% larger, down-volume 3.4% higher — not the structural
+//      tilt implied. Side-ranking is cheap insurance, not a major correction.
+//    · "Volume and range are strongly correlated." MODERATE, not strong: r = 0.40.
+//    · DVS null: theory says E[DVS] = 1, and the MEAN is 0.787 — close. But DVS is a
+//      squared quantity, so the MEDIAN is 0.601 and the two must not be confused. This
+//      distinction caused a real bug; see LAYER 10.
+//
+//  TRADING STUDY · 61 instruments · 9 asset classes · daily back to 2000 · net of costs
+//  ------------------------------------------------------------------------------------
+//    THIS INDICATOR, TRADED IN ITS DESIGNED DIRECTION, LOSES MONEY. Not noise around
+//    zero — a stable negative edge. Pooled Sharpe -0.73, alpha t = -2.7, positive in
+//    18% of years and 1 of 5 walk-forward folds, deflated Sharpe 0.000.
+//    No parameter setting rescues it: across 60 configurations of smoothing, lookback
+//    and threshold the best INVERTED Sharpe was 0.603 (median 0.484) — all below plain
+//    buy-and-hold at 0.76. Inverting is not a fix; it fails deflation at DSR 0.615.
+//
+//    What DOES survive every test is a primitive this design discarded as redundant:
+//      fade smoothed CLV        Sharpe 1.31, DSR 1.000, 5/5 folds, 93% of years
+//      fade wick asymmetry      Sharpe 2.31, DSR 1.000, 5/5 folds, 100% of years
+//    Decomposing CLV = bodyEff + wickAsym shows the BODY half earns 0.65 and is half
+//    explained by ordinary short-term reversal (r = 0.52), while the WICK half earns
+//    2.31 and is nearly orthogonal to it (r = 0.14). An indicator premised on candle
+//    BODIES finds its only durable edge in the part of the bar it treats as secondary.
+//
+//    Both are cross-sectional PORTFOLIO effects (median per-instrument Sharpe 0.18-0.45,
+//    ~52 instruments held, 2.6-6.5% unlevered). Neither is tradeable on a single chart.
+//    Use this script to READ the auction, not to take directional signals from it.
+//
+//  THE FINDING THAT MATTERS MOST
+//    Balance describes the past well and does not extrapolate.
+//      · Contemporaneous IC vs the trailing 10-bar return:  +0.687
+//      · Forward IC vs the next 1 / 5 / 10 / 20 / 50 / 100 bars: NEGATIVE at every
+//        horizon, on both intraday (-0.018 to -0.044) and swing (-0.033 to -0.072).
+//    The sign does not flip as the horizon lengthens, so this is not short-horizon
+//    mean-reversion noise — on this universe and sample the directional read is
+//    inverted relative to forward returns. Six features clear a |t|>3 stability screen
+//    (bodyEff, clv, excessV, Balance, DPS, interEff) but all except excessV and
+//    distValue carry a NEGATIVE sign.
+//    Read this indicator as a description of the auction that just happened. Do not
+//    read a bullish state as a forecast without testing that premise on your own market.
+//    The in-table forward-return statistics will show you this directly on your chart.
+//
+//  Everything above is IN-SAMPLE on 2020-2026 data. It is a diagnostic, not a backtest.
+//
+//  ABLATION ORDER (cheapest path back to the validated MVP):
+//    Context strength -> 0 · Divergence off · HTF off · then five-state mode.
+//    If disabling a layer does not degrade state separation, that layer is not earning
+//    its complexity and should be cut.
+//
+//  ────────────────────────────────────────────────────────────────────────────────────
+//  MODIFICATIONS TO THIS COPY — display only. No model logic, no state, no thresholds.
+//    1. max_boxes_count added to indicator() so boxes can be drawn at all.
+//    2. VOLUME PROFILE HISTOGRAM is now rendered on the chart, toggleable. vpKey/vpVol
+//       always held this distribution; only its three derived levels were ever drawn.
+//       Scaling reuses pocVol, already maintained as the running maximum — no new state.
+//    3. inpShowLevels split into independent inpShowPoc and inpShowVa toggles, so the
+//       point of control and the value-area boundaries can be shown separately.
+//    4. Chart level tags now anchor at tagX instead of a hardcoded bar_index + 3, so
+//       they sit clear of the histogram instead of on top of it.
+//  Everything above this block is the original script and is unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+indicator("MSBP · Micro-Structure Body Pressure", "MSBP", overlay = false,
+     max_bars_back = 5000, max_lines_count = 500, max_labels_count = 500,
+     max_boxes_count = 500, precision = 3)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  INPUTS   model parameters first, then pure display toggles. Every input is hidden
+//  from the status line so only plotted values appear there.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+var string G_CORE = "01 · Core Model"
+int    inpLookback   = input.int(250, "Distribution lookback (bars)", minval = 50, maxval = 2000, group = G_CORE, tooltip = "Window for percentile ranks. Constant in BARS, not in time — this is what keeps the model scale-free from 1m to Weekly.", display = display.none)
+int    inpSmooth     = input.int(14,  "Pressure smoothing (bars)",    minval = 1,  maxval = 200,  group = G_CORE, tooltip = "EMA length on bull/bear pressure. Effective lag ≈ (n−1)/2 bars, reported in the stats table so the tradeoff stays visible.", display = display.none)
+int    inpSideN      = input.int(150, "Side-rank sample size",         minval = 30, maxval = 400,  group = G_CORE, tooltip = "How many prior SAME-SIDE bars form the reference distribution for body magnitude. This is the leverage-effect correction: a strong up bar must mean strong relative to up bars.", display = display.none)
+int    inpInterLen   = input.int(10,  "Interbar efficiency window",    minval = 3,  maxval = 100,  group = G_CORE, tooltip = "Kaufman-style path efficiency across bars. This is the axis that genuinely IS independent: it correlates only 0.045 with intrabar DVS. (Intrabar DVS, by contrast, correlates 0.87 with body magnitude — those two are not separate axes.)", display = display.none)
+
+var string G_VOL = "02 · Volume"
+string inpVolMode    = input.string("Full", "Volume mode", options = ["Full", "Reduced", "Off"], group = G_VOL, tooltip = "Full: volume terms active.\nReduced: doubled normalization window for thin instruments or very low timeframes.\nOff: volume-free mode for spot FX (tick volume), index CFDs (synthetic volume), or contaminated crypto pairs. The profile degrades to a TPO / time-at-price distribution.", display = display.none)
+float  inpVolWeight  = input.float(0.35, "Excess-volume weight", minval = 0.0, maxval = 1.0, step = 0.05, group = G_VOL, tooltip = "How strongly the volume-on-range RESIDUAL modulates pressure. Raw volume is near-collinear with range and is deliberately not used anywhere in this script.", display = display.none)
+bool   inpExAuction  = input.bool(true, "Down-weight session's first bar", group = G_VOL, tooltip = "Equity opening auction prints belong to a different process than continuous trading and will otherwise dominate every volume percentile.", display = display.none)
+
+var string G_NORM = "03 · Normalization"
+bool   inpSlotNorm   = input.bool(true, "Time-of-day slot normalization", group = G_NORM, tooltip = "CRITICAL for intraday. Volume and range are U-shaped through a session; without slot normalization this engine measures the clock — reporting expansion every morning and compression every lunch, on every instrument. Auto-disabled on daily+.", display = display.none)
+float  inpSlotAlpha  = input.float(0.10, "Slot adaptation rate", minval = 0.01, maxval = 0.50, step = 0.01, group = G_NORM, tooltip = "EMA rate for the per-slot baseline. 0.10 ≈ 10-day effective memory per slot.", display = display.none)
+int    inpNullLen    = input.int(500, "Null calibration window", minval = 100, maxval = 3000, group = G_NORM, tooltip = "Rolling-median window for the calibrated nulls, reported in the table as a diagnostic. MEASURED across 75 series: median DVS ranges 0.50-1.59 by instrument and timeframe, so a hard-coded constant would be wrong nearly everywhere. Note the quadrant no longer depends on this — it thresholds percentile ranks directly.", display = display.none)
+
+var string G_CTX = "04 · Auction Context"
+bool   inpCtxOn      = input.bool(true, "Enable volume profile / value area", group = G_CTX, display = display.none)
+float  inpBinsPerAtr = input.float(4.0, "Profile bins per ATR", minval = 1.0, maxval = 20.0, step = 0.5, group = G_CTX, tooltip = "Bin width = ATR / this. Bin size is FROZEN at session start so keys stay consistent within a profile.", display = display.none)
+float  inpVaPct      = input.float(0.70, "Value area fraction", minval = 0.50, maxval = 0.95, step = 0.01, group = G_CTX, display = display.none)
+float  inpCtxStr     = input.float(0.00, "Context multiplier strength", minval = 0.0, maxval = 1.0, step = 0.05, group = G_CTX, tooltip = "DEFAULT 0 — UNTESTED. The trading study ran with this layer OFF, so it is neither validated nor refuted. Levels are still drawn on the chart (they are useful regardless); only the effect on the pressure score is disabled. Raise it only after running the ctxStr sweep yourself.", display = display.none)
+bool   inpIntrabar   = input.bool(true, "Build profile from intrabar data", group = G_CTX, tooltip = "Uses request.security_lower_tf() to distribute volume by ACTUAL traded price rather than spreading it uniformly across the bar range. Materially more accurate, materially slower, history depth is plan-dependent. Falls back automatically when unavailable.", display = display.none)
+bool   inpShowIb     = input.bool(true, "Initial Balance", group = G_CTX, tooltip = "High and low of the first N minutes of the session — the opening auction's agreed range. Drawn as dashed lines because it is a TIME structure, not a volume one. Intraday only.", display = display.none)
+int    inpIbMinutes  = input.int(60, "Initial Balance minutes", minval = 5, maxval = 240, step = 5, group = G_CTX, display = display.none)
+int    inpAcceptBars = input.int(3, "Acceptance confirmation (bars)", minval = 1, maxval = 20, group = G_CTX, tooltip = "Closes required beyond the value area before an excursion counts as acceptance rather than rejection. Acceptance also requires value migration — price alone is not enough.", display = display.none)
+
+var string G_STATE = "05 · State Engine"
+float  inpEnterThr   = input.float(0.50, "Trend ENTRY threshold |balance|", minval = 0.10, maxval = 0.95, step = 0.05, group = G_STATE, display = display.none)
+float  inpExitThr    = input.float(0.30, "Trend EXIT threshold |balance|",  minval = 0.05, maxval = 0.90, step = 0.05, group = G_STATE, tooltip = "Must sit BELOW the entry threshold. The gap is the hysteresis band — a single threshold guarantees flapping exactly where the signal spends the most time.", display = display.none)
+int    inpDwell      = input.int(2, "Minimum dwell (bars)", minval = 1, maxval = 20, group = G_STATE, tooltip = "Bars a candidate state must persist before it is CONFIRMED. Costs lag. Provisional states are still drawn, at reduced opacity.", display = display.none)
+float  inpClimaxPct  = input.float(0.90, "Climax percentile", minval = 0.70, maxval = 0.99, step = 0.01, group = G_STATE, display = display.none)
+float  inpFarValue   = input.float(2.0, "Exhaustion distance from value (ATR)", minval = 0.5, maxval = 10.0, step = 0.25, group = G_STATE, display = display.none)
+bool   inpLegalOnly  = input.bool(true, "Enforce legal-transition graph", group = G_STATE, tooltip = "Forbids implausible jumps — Bull Trend → Bear Trend must route through Weakening, Exhaustion or Contested. Converts a class of one-bar noise flips into no-ops.", display = display.none)
+bool   inpFiveState  = input.bool(true, "Five-state mode (MVP)", group = G_STATE, tooltip = "Collapses to Bull Trend / Bear Trend / Balance / Contested / Transition. Start here. Split into ten only after each new state passes a forward-return separation test.", display = display.none)
+
+var string G_FADE = "06 · Validated fade signals"
+int    inpFadeSpan   = input.int(5, "Fade smoothing (EMA span)", minval = 1, maxval = 50, group = G_FADE, tooltip = "MEASURED: fading smoothed close-location value is the ONLY component of this script that clears every statistical test — pooled Sharpe 1.31, deflated Sharpe 1.000, 5/5 walk-forward folds, 93% of years positive, and it survives spanning regressions against short-term reversal at t=+7.1. The parameter surface is a PLATEAU: span 2-5 with threshold 0.0-0.3 all work.", display = display.none)
+float  inpFadeThr    = input.float(0.30, "Fade threshold", minval = 0.0, maxval = 0.9, step = 0.05, group = G_FADE, display = display.none)
+bool   inpShowFade   = input.bool(true, "Show fade tapes", group = G_FADE, display = display.none)
+
+var string G_DIV = "07 · Divergence"
+bool   inpDivOn      = input.bool(true, "Enable divergence scoring", group = G_DIV, tooltip = "Continuous slope comparison — no pivots, therefore no confirmation lag and no apparent-repaint artifact. Its only role is to REDUCE confidence; it never generates a directional signal.", display = display.none)
+int    inpDivLen     = input.int(20, "Divergence window (bars)", minval = 5, maxval = 200, group = G_DIV, display = display.none)
+bool   inpDivGate    = input.bool(true, "Only score divergence outside value", group = G_DIV, tooltip = "Divergence inside the value area is mostly rotation noise.", display = display.none)
+
+var string G_HTF = "08 · Higher Timeframe"
+bool   inpHtfOn      = input.bool(true, "Enable HTF regime gate", group = G_HTF, display = display.none)
+string inpHtfTf      = input.string("Auto", "HTF", options = ["Auto", "5", "15", "30", "60", "120", "240", "D", "W"], group = G_HTF, display = display.none)
+bool   inpHtfConfirm = input.bool(true, "Use confirmed HTF bars only", group = G_HTF, tooltip = "ON: reads the CLOSED higher-timeframe bar. No intrabar updating, no repaint. OFF: reads the developing bar — more responsive, but historical and live behavior then differ.", display = display.none)
+
+var string G_DISP = "09 · Display · lower pane"
+bool   inpShowLadder = input.bool(false, "Bull / Bear pressure",       group = G_DISP, display = display.none)
+bool   inpShowImp    = input.bool(true,  "Bull / Bear impulse (raw)",  group = G_DISP, display = display.none)
+bool   inpShowBal    = input.bool(true,  "Balance line",               group = G_DISP, display = display.none)
+bool   inpShowQuad   = input.bool(true,  "Quadrant background (pane)", group = G_DISP, display = display.none)
+bool   inpShowTable  = input.bool(true,  "Stats table",                group = G_DISP, display = display.none)
+
+// MODIFIED: everything drawn on the PRICE chart now lives in one group behind one master
+// switch. Previously these were scattered across two groups and IB was double-gated —
+// 04 · Auction Context → Initial Balance AND 09 · Display → Initial Balance (chart) both
+// had to be on, which is two switches for one line. The master is ANDed into each item,
+// so a single toggle clears the chart while the lower pane keeps working.
+var string G_CHART = "09b · Display · price chart"
+bool   inpShowChart  = input.bool(true,  "▸ ALL CHART OVERLAYS",       group = G_CHART, tooltip = "Master switch for everything this script draws on the price chart: profile histogram, POC, value area, Initial Balance, VWAP, state tint and transition markers. The lower pane is unaffected.\n\nNOTE: the profile is still COMPUTED when this is off — it feeds locState, nodeRel, acceptance and the context multiplier. To stop computing it, use 04 · Auction Context → Enable volume profile / value area.", display = display.none)
+bool   inpShowVP     = input.bool(true,  "    Volume profile histogram", group = G_CHART, tooltip = "Draws the distribution that POC / VAH / VAL are derived from, so the levels can be read against the shape that produced them.", display = display.none)
+int    inpVpWidth    = input.int(30,     "    Profile width (bars)",   minval = 8, maxval = 150, group = G_CHART, tooltip = "Histogram extends this many bars right of the last candle. Level tags are pushed clear of it automatically.", display = display.none)
+bool   inpShowPoc    = input.bool(true,  "    POC line",               group = G_CHART, display = display.none)
+bool   inpShowVa     = input.bool(true,  "    Value area (VAH / VAL)", group = G_CHART, display = display.none)
+bool   inpShowIbD    = input.bool(true,  "    Initial Balance",        group = G_CHART, tooltip = "Intraday only. Requires 04 · Auction Context → Initial Balance to be on as well, since that is what computes it.", display = display.none)
+bool   inpShowVwap   = input.bool(true,  "    VWAP (intraday)",        group = G_CHART, display = display.none)
+bool   inpShowState  = input.bool(true,  "    State tint (background)", group = G_CHART, display = display.none)
+bool   inpShowTrans  = input.bool(true,  "    Transition markers",     group = G_CHART, display = display.none)
+
+var string G_VAL = "10 · Self-Validation"
+bool   inpValOn      = input.bool(true, "Accumulate forward-return stats", group = G_VAL, tooltip = "For each bar, attributes the realized H-bar-forward return to the state that was active H bars ago. Fully causal. IN-SAMPLE on visible history — a diagnostic, never a backtest.", display = display.none)
+int    inpValH       = input.int(10, "Forward horizon (bars)", minval = 1, maxval = 200, group = G_VAL, display = display.none)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  ENVIRONMENT / TIMEFRAME GATING
+//  Session features are meaningless above the daily. Substitute a coarser profile anchor
+//  rather than computing something with no referent.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+bool   isIntraday    = timeframe.isintraday
+int    tfSec         = timeframe.in_seconds()
+bool   volOff        = inpVolMode == "Off"
+bool   volReduced    = inpVolMode == "Reduced"
+int    volNormLen    = volReduced ? inpLookback * 2 : inpLookback
+string profileAnchor = isIntraday ? "D" : timeframe.isdaily ? "W" : "M"
+bool   ctxEnabled    = inpCtxOn
+bool   slotEnabled   = inpSlotNorm and isIntraday
+bool   vwapEnabled   = isIntraday
+
+// MODIFIED: chart-overlay gates resolved once, here, so every draw site reads the same
+// boolean instead of re-deriving the condition. The master switch is ANDed into each.
+bool chartOn = inpShowChart
+bool vpOn    = chartOn and inpShowVP    and ctxEnabled
+bool pocOn   = chartOn and inpShowPoc   and ctxEnabled
+bool vaOn    = chartOn and inpShowVa    and ctxEnabled
+bool ibOn    = chartOn and inpShowIbD   and inpShowIb and isIntraday
+bool vwapOn  = chartOn and inpShowVwap  and vwapEnabled
+bool tintOn  = chartOn and inpShowState
+bool transOn = chartOn and inpShowTrans
+
+string htfTf = inpHtfTf != "Auto" ? inpHtfTf : isIntraday ? (tfSec * 5 >= 3600 ? "D" : str.tostring(math.max(1, tfSec * 5 / 60))) : timeframe.isdaily ? "W" : "M"
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  HELPERS
+//  NOTE ON DIVISION: Pine performs INTEGER division when both operands are int. Every
+//  ratio below casts explicitly. This is the single easiest way to silently zero out a
+//  model — cnt / n with two ints returns 0 for every value below 100%.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+f_sdiv(float a, float b) => na(b) or b == 0.0 ? 0.0 : a / b
+
+// Pine has no hyperbolic functions, so tanh is built from exp.
+//   tanh(x) = (e^2x − 1) / (e^2x + 1)
+// The argument is clamped to ±20 before exponentiating: e^40 is fine in float64, but
+// leaving it unbounded lets a single degenerate bar (zero-stdev window → huge z) push
+// exp to overflow and poison the series with na. Beyond ±20 the output is 1.0 to well
+// past float precision anyway, so the clamp costs nothing.
+f_tanh(float x) =>
+    float xc = math.max(-20.0, math.min(20.0, nz(x)))
+    float e  = math.exp(2.0 * xc)
+    (e - 1.0) / (e + 1.0)
+
+// Rank v against the stored sample WITHOUT including v itself, then store v.
+// Ranking before storing avoids the self-inclusion bias that makes every new extreme
+// read as the 100th percentile.
+f_rankThenPush(array<float> arr, float v, int cap) =>
+    int n   = array.size(arr)
+    int cnt = 0
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(arr, i) <= v
+                cnt += 1
+    float r = n > 0 ? cnt / float(n) : 0.5          // float() cast is load-bearing
+    array.push(arr, v)
+    if array.size(arr) > cap
+        array.shift(arr)
+    r
+
+// Binary search over an ascending int array. Returns [position, found].
+f_locate(array<int> keys, int k) =>
+    int  lo    = 0
+    int  hi    = array.size(keys) - 1
+    int  pos   = 0
+    bool found = false
+    while lo <= hi
+        int mid = (lo + hi) / 2
+        int mk  = array.get(keys, mid)
+        if mk == k
+            pos   := mid
+            found := true
+            break
+        else if mk < k
+            lo := mid + 1
+        else
+            hi := mid - 1
+    if not found
+        pos := lo
+    [pos, found]
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 0 · BAR PRIMITIVES
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+float body    = close - open
+float absBody = math.abs(body)
+float rng     = high - low
+float trng    = ta.tr(true)                        // gap-aware; matters on daily+
+float atr     = ta.atr(math.max(14, inpSmooth))
+float atrSafe = math.max(atr, syminfo.mintick)
+bool  isBull  = body > 0
+bool  isBear  = body < 0
+
+// Gaps matter on daily+, barely exist intraday on futures. Use the gap-aware range for
+// effort-vs-result; use the pure intrabar range for the variance-ratio math.
+float rngEff = isIntraday ? rng : trng
+
+bool newSession = ta.change(time(profileAnchor)) != 0
+bool auctionBar = inpExAuction and newSession
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 1 · SCALE-FREE GEOMETRY
+//  Every quantity here is dimensionless and identical in meaning at 1m and at Weekly.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+// Directional Variance Share.
+//   DVS = 4·ln2 · (C−O)² / (H−L)²
+//   Under driftless Brownian motion E[body²] = σ²T and E[range²] = 4·ln2·σ²T, so E[DVS]=1.
+//     DVS > 1 → intrabar path more one-sided than a random walk (momentum)
+//     DVS < 1 → intrabar rotation (two-sided auction, mean reversion)
+//   The THEORETICAL null is not used directly — see Layer 2.
+float LN2X4 = 4.0 * math.log(2.0)
+float dvs   = rng > 0 ? LN2X4 * math.pow(body / rng, 2.0) : 0.0
+
+// Signed body efficiency. |E| has a theoretical null of 0.5 (ratio of expectations).
+float bodyEff = f_sdiv(body, rng)
+
+// Rejection Work Asymmetry, from the Rogers–Satchell decomposition.
+//   RS = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O)  — unbiased under drift, which is precisely
+//   the property needed to separate directional information from noise. Each term is
+//   large when the extreme sits far from BOTH open and close: work done and not held.
+//   Null = 0, with a known scale — unlike any ad-hoc wick ratio.
+float lnHO   = high > 0 and open  > 0 ? math.log(high / open)  : 0.0
+float lnHC   = high > 0 and close > 0 ? math.log(high / close) : 0.0
+float lnOL   = low  > 0 and open  > 0 ? math.log(open / low)   : 0.0
+float lnCL   = low  > 0 and close > 0 ? math.log(close / low)  : 0.0
+float upWork = lnHO * lnHC
+float dnWork = lnOL * lnCL
+float rwa    = f_sdiv(dnWork - upWork, dnWork + upWork)
+
+// Close location value. NOTE: CLV ≡ bodyEff + wickAsymmetry, EXACTLY, for both bar
+// directions. It is used below only for the exhaustion test, and is deliberately NOT
+// fed into the pressure score alongside its own two components.
+float clv = f_sdiv((close - low) - (high - close), rng)
+
+// Wick asymmetry, obtained free from the identity CLV = bodyEff + wickAsym (verified to
+// 1.1e-16 over 259,515 bars). MEASURED: fading this earns pooled Sharpe 2.31 and is
+// nearly ORTHOGONAL to short-term reversal (r = 0.14), whereas the body half earns 0.65
+// and is half-explained by it (r = 0.52). The edge is in the wick, not the body.
+float wickAsym = clv - bodyEff
+
+// Interbar (Kaufman-style) path efficiency — the second scale.
+float netMove   = close - close[inpInterLen]
+float pathSum   = math.sum(rng, inpInterLen)
+float interEffS = f_sdiv(netMove, pathSum)
+float interEff  = math.abs(interEffS)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 2 · CALIBRATED NULLS
+//  Observed range is downward-biased under discrete sampling, which biases DVS upward by
+//  an instrument- and timeframe-specific amount. Measure the bias; never assume it away.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+float dvsNull   = math.max(ta.median(dvs,      inpNullLen), 0.05)
+float interNull = math.max(ta.median(interEff, inpNullLen), 0.01)
+float dvsRel    = f_sdiv(dvs,     dvsNull)         // 1.0 = typical for THIS instrument/TF
+float interRel  = f_sdiv(interEff, interNull)
+float dvsSm     = ta.ema(dvsRel,   inpSmooth)
+float interSm   = ta.ema(interRel, inpSmooth)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 3 · TIME-OF-DAY SLOT NORMALIZATION
+//  Without this the intraday engine is a clock. Baselines are READ before being UPDATED,
+//  so each bar is normalized against prior days' behavior in the same slot.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+int MAXSLOT = 2000
+var array<float> slotBody = array.new<float>(MAXSLOT, na)
+var array<float> slotVol  = array.new<float>(MAXSLOT, na)
+
+int slotIdx = 0
+if slotEnabled and tfSec > 0
+    slotIdx := ((hour * 3600 + minute * 60 + second) / tfSec) % MAXSLOT
+
+float rawMag = f_sdiv(absBody, atrSafe)
+float rawVol = volOff ? 1.0 : math.max(nz(volume), 0.0)
+
+// Slow causal global means, used only to floor the per-slot denominators below.
+// Declared and updated BEFORE first use — Pine resolves identifiers top-down.
+var float gMag = na
+var float gVol = na
+gMag := na(gMag) ? rawMag : gMag + 0.001 * (rawMag - gMag)
+gVol := na(gVol) ? rawVol : gVol + 0.001 * (rawVol - gVol)
+
+float slotBodyBase = slotEnabled ? array.get(slotBody, slotIdx) : na
+float slotVolBase  = slotEnabled ? array.get(slotVol,  slotIdx) : na
+// Denominator floored at 25% of the running global mean: a slot whose baseline has not
+// yet converged (or that legitimately sits near zero) would otherwise produce a ratio
+// with an unbounded right tail. Measured max before flooring: 2.3e3.
+float magBase = slotEnabled and not na(slotBodyBase) ? math.max(slotBodyBase, 0.25 * nz(gMag, slotBodyBase)) : na
+float volBase = slotEnabled and not na(slotVolBase)  ? math.max(slotVolBase,  0.25 * nz(gVol, slotVolBase))  : na
+float magNorm = not na(magBase) and magBase > 0 ? rawMag / magBase : rawMag
+float volNorm = not na(volBase) and volBase > 0 ? rawVol / volBase : rawVol
+
+if slotEnabled and barstate.isconfirmed and not na(atr)
+    float pb = array.get(slotBody, slotIdx)
+    float pv = array.get(slotVol,  slotIdx)
+    array.set(slotBody, slotIdx, na(pb) ? rawMag : pb + inpSlotAlpha * (rawMag - pb))
+    array.set(slotVol,  slotIdx, na(pv) ? rawVol : pv + inpSlotAlpha * (rawVol - pv))
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 4 · SIDE-RANKED MAGNITUDE  (leverage-effect correction)
+//  In equities and equity indices, down bars carry systematically larger bodies and higher
+//  volume. Ranking both sides on one scale builds a structural bearish tilt into the score
+//  — it will report "sellers dominant" as a baseline condition.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+var array<float> bullMags = array.new<float>()
+var array<float> bearMags = array.new<float>()
+
+float magRank = 0.0
+if isBull
+    magRank := f_rankThenPush(bullMags, magNorm, inpSideN)
+else if isBear
+    magRank := f_rankThenPush(bearMags, magNorm, inpSideN)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 5 · EXCESS VOLUME  (Wyckoff effort-vs-result, made computable)
+//  Volume and range are strongly positively correlated almost everywhere, so the JOINT
+//  occurrence of a big body and high volume is the EXPECTED case and carries little
+//  information. The residual of volume on range is where the signal lives.
+//    e > 0 → more volume than the movement justified  (absorption; an HVN is forming)
+//    e < 0 → more movement than the volume justified  (vacuum move through a thin book)
+//  Related to Amihud illiquidity, but centered and stable at small denominators.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+float logVol  = math.log(1.0 + volNorm)
+float logRng  = math.log(1.0 + f_sdiv(rngEff, atrSafe))
+float sdV     = ta.stdev(logVol, volNormLen)
+float sdR     = ta.stdev(logRng, volNormLen)
+float zV      = f_sdiv(logVol - ta.sma(logVol, volNormLen), sdV)
+float zR      = f_sdiv(logRng - ta.sma(logRng, volNormLen), sdR)
+float betaVR  = ta.correlation(logVol, logRng, volNormLen)    // both z-scored ⇒ β = ρ
+float excessV = volOff or auctionBar ? 0.0 : zV - nz(betaVR) * zR
+float volMult = volOff ? 1.0 : 1.0 + inpVolWeight * f_tanh(excessV)
+float volPct  = nz(ta.percentrank(nz(volNorm), inpLookback) / 100.0, 0.5)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 6 · VOLUME PROFILE / VALUE AREA
+//  Parallel arrays kept sorted ascending by price-bin key. POC is tracked in O(1): volume
+//  only ever increases, so any level exceeding the running max IS the new POC. The value
+//  area walk terminates as soon as the target fraction is enclosed.
+//  Bin size is FROZEN at session start so keys stay consistent within a profile.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+var array<int>   vpKey = array.new<int>()
+var array<float> vpVol = array.new<float>()
+var float vpBin       = na
+var float vpTotal     = 0.0
+var int   pocKey      = na
+var float pocVol      = 0.0
+var float poc         = na
+var float vah         = na
+var float val         = na
+var float prevPoc     = na
+var float prevVah     = na
+var float prevVal     = na
+var float sessOpenPoc = na
+
+f_vpAdd(array<int> keys, array<float> vols, int k, float v) =>
+    [pos, found] = f_locate(keys, k)
+    float nv = v
+    if found
+        nv := array.get(vols, pos) + v
+        array.set(vols, pos, nv)
+    else
+        array.insert(keys, pos, k)
+        array.insert(vols, pos, v)
+    nv
+
+// Optional intrabar distribution. Converts profile construction from an allocation MODEL
+// (uniform spread across the bar range) into a measurement of where volume actually
+// traded. This is the one upgrade that improves the EPISTEMICS rather than the modeling.
+string ltf = tfSec >= 3600 ? "5" : "1"
+array<float> ibHigh = inpIntrabar and ctxEnabled ? request.security_lower_tf(syminfo.tickerid, ltf, high)   : na
+array<float> ibLow  = inpIntrabar and ctxEnabled ? request.security_lower_tf(syminfo.tickerid, ltf, low)    : na
+array<float> ibVol  = inpIntrabar and ctxEnabled ? request.security_lower_tf(syminfo.tickerid, ltf, volume) : na
+
+if ctxEnabled
+    if newSession
+        prevPoc := poc                              // capture completed profile
+        prevVah := vah
+        prevVal := val
+        array.clear(vpKey)
+        array.clear(vpVol)
+        vpTotal     := 0.0
+        pocKey      := na
+        pocVol      := 0.0
+        vpBin       := math.max(syminfo.mintick, atrSafe / inpBinsPerAtr)
+        sessOpenPoc := na
+
+    if not na(vpBin) and vpBin > 0
+        bool usedIntrabar = false
+        if inpIntrabar and not na(ibHigh) and not na(ibLow) and not na(ibVol)
+            int m = array.size(ibHigh)
+            if m > 0 and m == array.size(ibLow) and m == array.size(ibVol)
+                usedIntrabar := true
+                for j = 0 to m - 1
+                    float ih = array.get(ibHigh, j)
+                    float il = array.get(ibLow,  j)
+                    float iv = volOff ? 1.0 : math.max(nz(array.get(ibVol, j)), 0.0)
+                    if not na(ih) and not na(il)
+                        int kl  = int(math.floor(il / vpBin))
+                        int kh  = int(math.floor(ih / vpBin))
+                        int nb  = math.max(1, math.min(kh - kl + 1, 200))
+                        float per = iv / nb
+                        for k = kl to kl + nb - 1
+                            float tot = f_vpAdd(vpKey, vpVol, k, per)
+                            vpTotal += per
+                            if tot > pocVol
+                                pocVol := tot
+                                pocKey := k
+        if not usedIntrabar
+            // Fallback: uniform spread across the bar range. Cheaper, and materially
+            // wrong for large bars — which is the whole argument for intrabar mode.
+            int kl = int(math.floor(low  / vpBin))
+            int kh = int(math.floor(high / vpBin))
+            int nb = math.max(1, math.min(kh - kl + 1, 200))
+            float per = (volOff ? 1.0 : math.max(nz(volume), 0.0)) / nb
+            for k = kl to kl + nb - 1
+                float tot = f_vpAdd(vpKey, vpVol, k, per)
+                vpTotal += per
+                if tot > pocVol
+                    pocVol := tot
+                    pocKey := k
+
+    // Value area: expand outward from the POC, always taking the heavier neighbor.
+    int nLev = array.size(vpKey)
+    if nLev > 0 and not na(pocKey) and not na(vpBin)
+        [pi, pfound] = f_locate(vpKey, pocKey)
+        if pfound
+            float target = vpTotal * inpVaPct
+            int   lo     = pi
+            int   hi     = pi
+            float acc    = array.get(vpVol, pi)
+            int   guard  = 0
+            while acc < target and (lo > 0 or hi < nLev - 1) and guard < 1000
+                guard += 1
+                float vd = lo > 0        ? array.get(vpVol, lo - 1) : -1.0
+                float vu = hi < nLev - 1 ? array.get(vpVol, hi + 1) : -1.0
+                if vu >= vd
+                    hi  += 1
+                    acc += vu
+                else
+                    lo  -= 1
+                    acc += vd
+            poc := (pocKey + 0.5) * vpBin
+            vah := (array.get(vpKey, hi) + 1.0) * vpBin
+            val := array.get(vpKey, lo) * vpBin
+            if na(sessOpenPoc)
+                sessOpenPoc := poc
+
+// Value migration — the cleanest available multi-session regime signal.
+// Overlap 1.0 = full balance; 0.0 = value fully displaced, i.e. a trending auction.
+float pocMigration = not na(poc) and not na(prevPoc) ? f_sdiv(poc - prevPoc, atrSafe) : 0.0
+float pocDrift     = not na(poc) and not na(sessOpenPoc) ? f_sdiv(poc - sessOpenPoc, atrSafe) : 0.0
+float vaOverlap    = na
+if not na(vah) and not na(val) and not na(prevVah) and not na(prevVal)
+    float ovH = math.max(0.0, math.min(vah, prevVah) - math.max(val, prevVal))
+    vaOverlap := ovH / math.max(vah - val, syminfo.mintick)
+
+// Location relative to value: −1 below VAL, 0 inside, +1 above VAH.
+int   locState  = 0
+float distValue = 0.0
+if ctxEnabled and not na(vah) and not na(val)
+    locState  := close > vah ? 1 : close < val ? -1 : 0
+    distValue := close > vah ? f_sdiv(close - vah, atrSafe) : close < val ? f_sdiv(val - close, atrSafe) : 0.0
+
+// HVN / LVN at the current price — is there resting business here, or did price fly through?
+float nodeRel = 1.0
+if ctxEnabled and not na(vpBin) and vpBin > 0 and array.size(vpKey) > 0 and vpTotal > 0
+    [cpos, cfound] = f_locate(vpKey, int(math.floor(close / vpBin)))
+    float cvol = cfound ? array.get(vpVol, cpos) : 0.0
+    nodeRel := f_sdiv(cvol, vpTotal / array.size(vpKey))   // >1 HVN, <1 LVN
+
+// Acceptance vs rejection: price, TIME and value migration — not price alone.
+var int barsBeyond = 0
+if ctxEnabled
+    barsBeyond := locState != 0 and locState == nz(locState[1]) ? barsBeyond + 1 : locState != 0 ? 1 : 0
+bool accepted = ctxEnabled and barsBeyond >= inpAcceptBars and (locState == 1 ? pocDrift >= 0 : locState == -1 ? pocDrift <= 0 : false)
+
+// ── Initial Balance ────────────────────────────────────────────────────────────────────
+// High and low of the first N minutes of the session. Unlike the value area this is a
+// TIME structure: it freezes once the window closes and then holds still for the rest of
+// the day, which is what makes it useful as a fixed reference to trade against.
+var float ibh     = na
+var float ibl     = na
+var int   ibStart = na
+bool ibActive = false
+if isIntraday
+    if newSession
+        ibh     := high
+        ibl     := low
+        ibStart := time
+    else if not na(ibStart) and time - ibStart < inpIbMinutes * 60000
+        ibh := math.max(nz(ibh, high), high)
+        ibl := math.min(nz(ibl, low),  low)
+    ibActive := not na(ibStart) and time - ibStart < inpIbMinutes * 60000
+
+int   ibLoc   = not na(ibh) and not na(ibl) ? (close > ibh ? 1 : close < ibl ? -1 : 0) : 0
+float ibWidth = not na(ibh) and not na(ibl) ? f_sdiv(ibh - ibl, atrSafe) : na
+
+// VWAP σ-bands — the natural intraday normalizer for distance.
+float vwapV     = ta.vwap(hlc3)
+float vwapDev   = close - nz(vwapV, close)
+float vwapSd    = ta.stdev(vwapDev, math.max(20, inpSmooth))
+float vwapZ     = vwapEnabled and not na(vwapV) ? f_sdiv(close - vwapV, math.max(nz(vwapSd), atrSafe)) : 0.0
+// Skew of the volume-at-price distribution. Non-obvious, non-redundant, cheap.
+float vwapPocSpread = vwapEnabled and not na(poc) and not na(vwapV) ? f_sdiv(vwapV - poc, atrSafe) : 0.0
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 7 · HTF REGIME GATE
+//  Offset is a parameter rather than an external [] on the call, so confirmed-only mode
+//  reads the CLOSED higher-timeframe bar with no repaint.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+f_htfBias(int off) =>
+    float e1 = ta.ema(close, 20)
+    float e2 = ta.ema(close, 50)
+    float a  = math.max(ta.atr(20), syminfo.mintick)
+    float v  = (e1 - e2) / a
+    math.max(-3.0, math.min(3.0, nz(v[off])))
+
+int   htfOff  = inpHtfConfirm ? 1 : 0
+float htfBias = inpHtfOn ? nz(request.security(syminfo.tickerid, htfTf, f_htfBias(htfOff), lookahead = barmerge.lookahead_off)) : 0.0
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 8 · CONTEXT MULTIPLIER
+//  Location enters MULTIPLICATIVELY, never additively. An additive term would let a large
+//  body override an unfavorable location, destroying the entire premise that context
+//  changes what the same evidence means.
+//    initiative   = buying above value / selling below value  → amplify
+//    responsive   = buying below value / selling above value  → expected rotation, damp
+//    inside value = rotational by construction                → damp heavily
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+f_context(int dir) =>
+    float m = 1.0
+    if ctxEnabled and not na(vah) and not na(val)
+        if locState == 0
+            m := 0.72
+        else if locState == dir
+            m := accepted ? 1.42 : 1.16
+        else
+            m := 0.86
+        m := m * (nodeRel > 1.4 ? 0.85 : nodeRel < 0.6 ? 1.15 : 1.0)
+    if inpHtfOn and math.abs(htfBias) > 0.25
+        m := m * (math.sign(htfBias) == dir ? 1.12 : 0.90)
+    1.0 + (m - 1.0) * inpCtxStr                    // inpCtxStr = 0 disables the whole layer
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 9 · DIRECTIONAL PRESSURE SCORE
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+// MEASURED: dvsRel and magRank correlate at r = 0.87 — they are ONE axis, not two.
+// The old product magRank * effTerm was therefore ≈ magRank^1.9: it re-weighted the same
+// information rather than combining two sources, while the comment claimed independence.
+// Magnitude now enters once. dvsRel still drives the regime quadrant (Layer 10), where
+// it IS independent of the other axis (r = 0.045).
+float bullRaw = isBull ? magRank * volMult * f_context(1)  : 0.0
+float bearRaw = isBear ? magRank * volMult * f_context(-1) : 0.0
+
+float Bull = ta.ema(bullRaw, inpSmooth)
+float Bear = ta.ema(bearRaw, inpSmooth)
+
+// Balance is a RATIO, so it saturates — one enormous bar cannot pin the score, because it
+// raises numerator and denominator together.
+float Balance   = f_sdiv(Bull - Bear, Bull + Bear + 1e-10)
+float rawInt    = Bull + Bear
+float Intensity = nz(ta.percentrank(rawInt, inpLookback) / 100.0, 0.5)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 10 · TWO-SCALE QUADRANT
+//  Intrabar efficiency (are individual bars one-sided?) × interbar efficiency (do
+//  consecutive bars agree?). Only weakly correlated; the cross-product is far more
+//  informative than either alone.
+//    0 BALANCE  low × low    rotation in a range; mean reversion works
+//    1 IMPULSE  high × high  genuine initiative; the only regime a naive read supports
+//    2 WHIPSAW  high × low   decisive bars, no agreement; highest cost per trade
+//    3 GRIND    low × high   rotational bars, persistent drift; often the most durable
+//                            trend type, and the one oscillators consistently mislabel
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+// MEASURED, 259,515 bars / 75 series: DVS is a SQUARED quantity, so its distribution
+// is strongly right-skewed — mean(dvs) = 0.787 but median(dvs) = 0.601. Dividing by the
+// median therefore produces a series centred on mean/median = 1.31, NOT on 1.0, and the
+// old test `dvsSm > 1.0` fired on 84% of bars. Quadrant occupancy was
+//   BALANCE 10% · IMPULSE 46% · WHIPSAW 33% · GRIND 11%
+// i.e. the two cells this design exists to detect were nearly empty and the axis carried
+// almost no information. Thresholding each scale on its OWN percentile rank is
+// self-calibrating and makes the split mean what the comment says. Occupancy is now
+//   BALANCE 28% · IMPULSE 26% · WHIPSAW 23% · GRIND 23%
+float prIntra  = nz(ta.percentrank(dvsSm,   inpLookback) / 100.0, 0.5)
+float prInter  = nz(ta.percentrank(interSm, inpLookback) / 100.0, 0.5)
+bool  hiIntra  = prIntra > 0.5
+bool  hiInter  = prInter > 0.5
+int   quad     = hiIntra and hiInter ? 1 : hiIntra and not hiInter ? 2 : not hiIntra and hiInter ? 3 : 0
+float quadConf = quad == 1 ? 1.00 : quad == 3 ? 0.80 : quad == 0 ? 0.45 : 0.25
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 11 · DIVERGENCE  (continuous, causal, no pivots)
+//  Cumulative pressure is ANCHORED to the session. An unanchored running sum drifts
+//  without bound and its slope stops meaning anything over long histories.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+var float cumP = 0.0
+cumP := newSession ? bullRaw - bearRaw : cumP + (bullRaw - bearRaw)
+
+float zPx  = f_sdiv(close - ta.sma(close, inpDivLen), ta.stdev(close, inpDivLen))
+float zCum = f_sdiv(cumP  - ta.sma(cumP,  inpDivLen), ta.stdev(cumP,  inpDivLen))
+float slpP = ta.linreg(zPx,  inpDivLen, 0) - ta.linreg(zPx,  inpDivLen, 1)
+float slpC = ta.linreg(zCum, inpDivLen, 0) - ta.linreg(zCum, inpDivLen, 1)
+
+float divRaw = 0.0
+if inpDivOn and slpP != 0 and slpC != 0 and math.sign(slpP) != math.sign(slpC)
+    divRaw := -math.sign(slpP) * math.min(math.abs(slpP), math.abs(slpC))
+if inpDivGate and ctxEnabled and locState == 0
+    divRaw := 0.0                                  // inside value = rotation noise
+float divScore = math.max(-1.0, math.min(1.0, f_sdiv(divRaw, math.max(nz(ta.stdev(divRaw, inpLookback)), 1e-9))))
+
+// Divergence penalises confidence ONLY when it opposes the current directional read.
+float divPenalty = math.sign(divScore) == -math.sign(Balance) and Balance != 0 ? math.abs(divScore) * 0.35 : 0.0
+float Confidence = math.max(0.0, math.min(1.0, quadConf * (0.35 + 0.65 * Intensity) * (1.0 - divPenalty)))
+// DPS = Balance x Confidence. Restored as the default main trace by request. Note for
+// maintainers, not for the UI: the trading study measured this direction at Sharpe -0.73
+// with a deflated Sharpe of 0.000, so DPS is a descriptive composite, not a forecast.
+float DPS = Balance * Confidence
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 12 · STATE MACHINE
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+int S_BALANCE   = 0
+int S_BULL_EXP  = 1
+int S_BULL_TRN  = 2
+int S_BULL_WEAK = 3
+int S_BEAR_EXP  = 4
+int S_BEAR_TRN  = 5
+int S_BEAR_WEAK = 6
+int S_EXHAUST   = 7
+int S_FAILBRK   = 8
+int S_CONTEST   = 9
+
+f_stateName(int s) =>
+    switch s
+        0 => "ROTATIONAL"
+        1 => "EXPANSION UP"
+        2 => "ONE-SIDED UP"
+        3 => "UP, FADING"
+        4 => "EXPANSION DOWN"
+        5 => "ONE-SIDED DOWN"
+        6 => "DOWN, FADING"
+        7 => "CLIMACTIC"
+        8 => "FAILED BREAK"
+        9 => "CONTESTED"
+        => "?"
+
+var int state     = S_BALANCE
+var int candPrev  = S_BALANCE
+var int candRun   = 0
+var int barsInSt  = 0
+var int prevState = S_BALANCE
+
+// Hysteresis: which threshold applies depends on the state we are already in.
+bool  inBullSide = state == S_BULL_TRN or state == S_BULL_EXP or state == S_BULL_WEAK
+bool  inBearSide = state == S_BEAR_TRN or state == S_BEAR_EXP or state == S_BEAR_WEAK
+float bullThr    = inBullSide ? inpExitThr : inpEnterThr
+float bearThr    = inBearSide ? inpExitThr : inpEnterThr
+
+// Pre-computed series — ta.* must be evaluated unconditionally, never inside a branch.
+float hiCloseN = ta.highest(close, inpInterLen)[1]
+float loCloseN = ta.lowest(close,  inpInterLen)[1]
+int   dBalOff  = math.max(1, inpSmooth / 2)
+float dBal     = Balance - Balance[dBalOff]
+float dIntens  = Intensity - nz(Intensity[inpSmooth], Intensity)
+
+bool climaxBody = magRank >= inpClimaxPct
+bool climaxVol  = volOff ? true : (excessV > 0 and volPct >= inpClimaxPct)
+bool farFromVal = ctxEnabled and not na(vah) ? distValue >= inpFarValue : math.abs(vwapZ) >= inpFarValue
+bool closeOpp   = (Balance > 0 and clv < -0.2) or (Balance < 0 and clv > 0.2)
+// MEASURED: as a strict 5-way conjunction this fired on 0.028% of bars before the dwell
+// filter, and produced 0 confirmed EXHAUSTION states across 259,515 bars — dead code.
+// Individually the clauses hold 10.0% / 7.6% / 3.2% / 33.4% of the time; requiring 3 of 4
+// yields 0.59%, which is rare enough to stay meaningful and frequent enough to exist.
+int  exhScore   = (climaxBody ? 1 : 0) + (climaxVol ? 1 : 0) + (farFromVal ? 1 : 0) +
+                  ((closeOpp or math.abs(divScore) > 0.5) ? 1 : 0)
+bool exhaustion = exhScore >= 3 and math.abs(Balance) > inpExitThr
+
+bool balFlat     = math.abs(Balance) < inpExitThr
+bool contested   = balFlat and Intensity >= 0.65 and quad == 2
+
+bool breakoutUp = Balance > bullThr and magRank > 0.75 and Intensity > 0.55 and (ctxEnabled and not na(vah) ? locState == 1 and not accepted : close > hiCloseN)
+bool breakoutDn = Balance < -bearThr and magRank > 0.75 and Intensity > 0.55 and (ctxEnabled and not na(val) ? locState == -1 and not accepted : close < loCloseN)
+bool trendUp    = Balance > bullThr and (quad == 1 or quad == 3) and (ctxEnabled and not na(val) ? locState >= 0 : true)
+bool trendDn    = Balance < -bearThr and (quad == 1 or quad == 3) and (ctxEnabled and not na(vah) ? locState <= 0 : true)
+bool weakUp     = Balance > 0 and dBal < 0 and dIntens < 0
+bool weakDn     = Balance < 0 and dBal > 0 and dIntens < 0
+
+// Failed breakout: an excursion beyond value that produced no acceptance and returned.
+// Precisely detectable, and among the higher-quality reversal conditions in auction
+// trading — most indicators fold it into a generic reversal signal and lose it.
+var int brkDir = 0
+var int brkAge = 0
+if ctxEnabled
+    if brkDir == 0 and breakoutUp
+        brkDir := 1
+        brkAge := 0
+    else if brkDir == 0 and breakoutDn
+        brkDir := -1
+        brkAge := 0
+    else if brkDir != 0
+        brkAge += 1
+    if brkDir != 0 and (accepted or brkAge > inpAcceptBars * 3)
+        brkDir := 0
+        brkAge := 0
+bool failedBreak = ctxEnabled and brkDir != 0 and brkAge >= 1 and locState == 0 and math.sign(Balance) != brkDir
+
+// Classification, most specific first.
+int cand = S_BALANCE
+if exhaustion
+    cand := S_EXHAUST
+else if failedBreak
+    cand := S_FAILBRK
+else if contested
+    cand := S_CONTEST
+else if breakoutUp
+    cand := S_BULL_EXP
+else if breakoutDn
+    cand := S_BEAR_EXP
+else if trendUp
+    cand := weakUp ? S_BULL_WEAK : S_BULL_TRN
+else if trendDn
+    cand := weakDn ? S_BEAR_WEAK : S_BEAR_TRN
+else if not balFlat
+    cand := Balance > 0 ? S_BULL_WEAK : S_BEAR_WEAK
+
+// Five-state collapse. The previous mapping folded S_BEAR_EXP into S_BULL_EXP, so a
+// DOWNSIDE expansion displayed as "EXPANSION UP" — it destroyed the sign it was meant to
+// summarise. Direction is now preserved: each side collapses into its own trend state and
+// only the genuinely non-directional states merge.
+//   ROTATIONAL <- balance          ONE-SIDED UP   <- bull expansion / trend / fading
+//   CONTESTED  <- contested, climax   ONE-SIDED DOWN <- bear expansion / trend / fading
+//   FAILED BREAK stays on its own — it is the one reversal condition worth isolating.
+if inpFiveState
+    cand := cand == S_BULL_EXP or cand == S_BULL_WEAK ? S_BULL_TRN
+          : cand == S_BEAR_EXP or cand == S_BEAR_WEAK ? S_BEAR_TRN
+          : cand == S_EXHAUST ? S_CONTEST
+          : cand
+
+// Legal-transition graph. A regime flip must route through Weakening, Exhaustion,
+// Contested, Failed Breakout or Balance — never directly.
+f_legal(int a, int b) =>
+    bool ok = true
+    if (a == S_BULL_TRN or a == S_BULL_EXP) and (b == S_BEAR_TRN or b == S_BEAR_EXP)
+        ok := false
+    if (a == S_BEAR_TRN or a == S_BEAR_EXP) and (b == S_BULL_TRN or b == S_BULL_EXP)
+        ok := false
+    // Ten-state mode requires a trend to be entered through an Expansion. Five-state mode
+    // collapses Expansion away, so applying that rule there would trap the machine in
+    // ROTATIONAL permanently — which is why the graph used to be bypassed wholesale in
+    // five-state mode, losing the UP/DOWN guard with it. Scope the rule instead.
+    if not inpFiveState and a == S_BALANCE and (b == S_BULL_TRN or b == S_BEAR_TRN)
+        ok := false
+    ok
+
+candRun  := cand == candPrev ? candRun + 1 : 1
+candPrev := cand
+
+bool transitioned = false
+if cand != state and candRun >= inpDwell and (not inpLegalOnly or f_legal(state, cand))
+    prevState    := state
+    state        := cand
+    barsInSt     := 0
+    transitioned := true
+else
+    barsInSt += 1
+
+bool provisional = cand != state
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 12b · VALIDATED FADE SIGNALS
+//  The only two components of this script that survived the trading study, both of them
+//  primitives the original design computed and then discarded as redundant.
+//
+//    fade smoothed CLV        Sharpe 1.31 · DSR 1.000 · 5/5 folds · 93% of years
+//    fade smoothed wickAsym   Sharpe 2.31 · DSR 1.000 · 5/5 folds · 100% of years
+//
+//  READ THIS BEFORE ACTING ON THEM. Both are CROSS-SECTIONAL PORTFOLIO effects. Median
+//  per-instrument Sharpe is 0.45 (CLV) and 0.18 (wick); the headline numbers come from
+//  holding ~52 instruments simultaneously with a mean pairwise correlation of 0.026.
+//  On a single chart, alone, neither is tradeable. They are shown here so the signal is
+//  visible and reproducible — not as an entry trigger.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+float clvSm   = ta.ema(clv,      inpFadeSpan)
+float wickSm  = ta.ema(wickAsym, inpFadeSpan)
+int   clvFade  = clvSm  >  inpFadeThr ? -1 : clvSm  < -inpFadeThr ? 1 : 0
+int   wickFade = wickSm >  inpFadeThr ? -1 : wickSm < -inpFadeThr ? 1 : 0
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LAYER 13 · SELF-VALIDATION
+//  For each bar, attribute the realized H-bar-forward return to the state that was active
+//  H bars ago. Fully causal. IN-SAMPLE on visible history with overlapping samples: a
+//  diagnostic that visibly fails when the model is worthless, not a backtest.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+var array<float> stSum  = array.new<float>(10, 0.0)
+var array<int>   stN    = array.new<int>(10, 0)
+
+if inpValOn and barstate.isconfirmed and bar_index > inpValH + math.max(inpLookback, inpNullLen)
+    int   s0 = nz(state[inpValH], 0)
+    float r  = f_sdiv(close - close[inpValH], nz(atr[inpValH], atrSafe))
+    if s0 >= 0 and s0 < 10 and not na(r)
+        // Sign the return by the state's directional prior, so "mean forward move" reads
+        // as "was this state right", not merely "did price go up".
+        int   dir = s0 == S_BULL_EXP or s0 == S_BULL_TRN ? 1 : s0 == S_BEAR_EXP or s0 == S_BEAR_TRN ? -1 : 0
+        float rr  = dir != 0 ? r * dir : r
+        array.set(stSum,  s0, array.get(stSum,  s0) + rr)
+        array.set(stN,    s0, array.get(stN,    s0) + 1)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//  PRESENTATION LAYER
+//  ------------------------------------------------------------------------------------
+//  The visual language says STATE and CONFIDENCE. It never says buy or sell — a state
+//  estimate cannot support a trade recommendation and the chart should not imply it can.
+//
+//  Reading the lower pane, top to bottom — a symmetric sandwich:
+//    +1.20..+1.34  CLV fade tape      filled = in a position, washed = flat
+//    +1.06..+1.20  Wick fade tape     the two validated signals
+//     0 .. +-1     pressure ladder, raw impulse, and the main trace, over the
+//                  hysteresis band, so you can SEE why a state did or did not flip
+//    -1.06..-1.20  state ribbon       opacity encodes confidence
+//    -1.20..-1.34  regime ribbon      the intrabar x interbar quadrant
+//  Every band carries a right-edge label, so nothing in the pane needs decoding.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+var string G_UI = "11 · Appearance"
+string inpTheme   = input.string("Auto", "Palette", options = ["Auto", "Light", "Dark"], group = G_UI, tooltip = "Auto reads the chart's actual background colour and picks the matching palette, so it follows your TradingView theme with no configuration. Override only if you want the opposite.", display = display.none)
+string inpTblSize = input.string("Full", "Table detail", options = ["Full", "Compact", "Off"], group = G_UI, display = display.none)
+bool   inpRibbon  = input.bool(true,  "State + regime ribbons", group = G_UI, display = display.none)
+bool   inpBands   = input.bool(true,  "Show hysteresis band",   group = G_UI, display = display.none)
+bool   inpLadderF = input.bool(true,  "Fill pressure ladder",   group = G_UI, display = display.none)
+string inpTrace   = input.string("Balance + DPS", "Main trace", options = ["Balance + DPS", "Balance only"], group = G_UI, tooltip = "Balance + DPS restores the original two-line trace. Balance only plots the direction line by itself.", display = display.none)
+
+// ── palette ────────────────────────────────────────────────────────────────────────────
+// Theme is DETECTED, not configured. chart.bg_color is the real canvas colour, so the
+// Rec.601 luminance of it tells us which side of the fence we are on. Every colour below
+// then has a genuine dark value and a genuine light value — no mid-tone compromise that
+// is slightly wrong on both.
+float bgLum   = color.r(chart.bg_color) * 0.299 + color.g(chart.bg_color) * 0.587 + color.b(chart.bg_color) * 0.114
+bool  darkMode = inpTheme == "Dark" or (inpTheme == "Auto" and bgLum < 128)
+
+color C_BULL   = darkMode ? #3FB980 : #12744E
+color C_BEAR   = darkMode ? #E27466 : #AF3626
+color C_NEUT   = darkMode ? #8A97A0 : #69757E
+color C_ACC    = darkMode ? #4FB3AC : #17635F
+color C_GOLD   = darkMode ? #E0B45A : #916A12
+color C_VIOLET = darkMode ? #A87ABF : #6A3F84
+color C_OLIVE  = darkMode ? #A8B45E : #66721E
+color C_INK    = darkMode ? #E6EBE8 : #11171A
+color C_SOFT   = darkMode ? #94A0A6 : #586369
+color C_PANEL  = darkMode ? color.new(#0D1215, 6) : color.new(#FFFFFF, 4)
+color C_GRID   = darkMode ? color.new(#8A97A0, 70) : color.new(#7A868F, 74)
+
+// ── chart-level palette ────────────────────────────────────────────────────────────────
+// Earlier passes gave POC the same hue as VAH/VAL and separated them only by weight,
+// which fails the glance test: the single most important level looked like a thicker
+// version of its own container. The fix is to stop treating them as one family.
+//
+//   THE BAND identifies the value area. VAH and VAL never need to be told apart from
+//     each other — "inside / above / below" is a filled-region judgment, so they are one
+//     receding cool blue and the fill does the work.
+//   POC sits INSIDE that band, so it needs the opposite temperature to pop out of it.
+//     Warm amber on cool blue is the highest-contrast pairing available that is also the
+//     industry convention for a point of control.
+//   VWAP belongs to neither system — an average, not a distribution feature — so it takes
+//     a third hue well away from both: rose.
+//   IB is a TIME structure and is dashed, which separates it from every solid line here
+//     even where it overlaps them.
+color C_POC    = darkMode ? #FFB020 : #B26A00      // point of control — warm anchor, 2px
+color C_VA     = darkMode ? #5B8FD6 : #2C5C99      // value-area boundaries + band, cool
+color C_VWAP   = darkMode ? #F06BA8 : #A32468      // volume-weighted average, rose
+// Initial Balance: teal-cyan, and genuinely DASHED. It gets both its own hue and its own
+// line form because the opening range often sits within a few ticks of the value area,
+// and two solid cool lines that close together would be ambiguous. Cyan reads clearly
+// against the sky-blue value area without competing with the warm VWAP.
+color C_IB     = darkMode ? #2DD4BF : #0F766E      // initial balance, teal, dashed
+
+f_stateColorV2(int s) =>
+    switch s
+        0 => C_NEUT
+        1 => darkMode ? #4ACF8E : #18915F
+        2 => C_BULL
+        3 => C_OLIVE
+        4 => darkMode ? #F08A6A : #C05233
+        5 => C_BEAR
+        6 => C_GOLD
+        7 => C_VIOLET
+        8 => darkMode ? #E85F52 : #A82F1E
+        9 => C_GOLD
+        => C_NEUT
+
+color quadColorV2 = quad == 1 ? C_BULL : quad == 3 ? C_OLIVE : quad == 2 ? C_BEAR : C_NEUT
+string quadName   = quad == 1 ? "IMPULSE" : quad == 2 ? "WHIPSAW" : quad == 3 ? "GRIND" : "BALANCE"
+
+// ── unicode meters: encode magnitude in form, not just in a number ──────────────────────
+f_rep(string ch, int k) => k > 0 ? str.repeat(ch, k) : ""
+
+f_meter(float v, int w) =>
+    int f = int(math.round(math.max(0.0, math.min(1.0, nz(v))) * w))
+    f_rep("█", f) + f_rep("·", w - f)
+
+// MODIFIED: chart tags used to anchor at a hardcoded bar_index + 3, which is exactly
+// where the volume profile histogram now starts. Anchoring at tagX pushes the whole tag
+// column clear of the histogram when it is visible, and leaves it untouched when it is
+// not. The pane tags are unaffected — they cannot collide with a chart box.
+int tagX = bar_index + 3 + (vpOn ? inpVpWidth + 4 : 0)
+
+// Level tag: name AND price, so a line reports its own value instead of sending you to
+// the axis. format.mintick gives the right decimals per instrument with no configuration.
+// Declared at global scope — Pine forbids function declarations inside an if-block.
+//
+// BUGFIX: label.new inside `if barstate.islast` fires on EVERY live tick, so tags stacked
+// on top of each other until max_labels_count evicted them — which is why they appeared
+// doubled on some charts and clean on others, depending on ticks since the last close.
+// Holding a persistent handle and deleting before redraw makes it exact.
+f_tag(label lb, float y, string txt, color col, bool on) =>
+    label.delete(lb)
+    on and not na(y)
+         ? label.new(tagX, y, txt + "  " + str.tostring(y, format.mintick),
+              xloc.bar_index, yloc.price, color.new(col, 88), label.style_label_left,
+              col, size.tiny, force_overlay = true)
+         : label(na)
+
+// Pane tag: same handle discipline, drawn in the indicator pane rather than on the chart.
+f_paneTag(label lb, float y, string txt, color col, bool on) =>
+    label.delete(lb)
+    on ? label.new(bar_index + 3, y, txt, xloc.bar_index, yloc.price,
+              color.new(C_NEUT, 100), label.style_label_left, col, size.tiny)
+       : label(na)
+
+f_meterSigned(float v, int half) =>
+    float vv = math.max(-1.0, math.min(1.0, nz(v)))
+    int   f  = int(math.round(math.abs(vv) * half))
+    string lft = vv < 0 ? f_rep("·", half - f) + f_rep("█", f) : f_rep("·", half)
+    string rgt = vv > 0 ? f_rep("█", f) + f_rep("·", half - f) : f_rep("·", half)
+    lft + "┃" + rgt
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  LOWER PANE
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+// Hysteresis band, drawn first so it sits behind everything. Seeing the entry and exit
+// thresholds as a shaded corridor is what makes the state machine legible rather than
+// mysterious: a Balance line inside the corridor explains a state that refuses to flip.
+pEnterHi = plot(inpBands ?  inpEnterThr : na, "", color.new(C_GRID, 100), display = display.none)
+pExitHi  = plot(inpBands ?  inpExitThr  : na, "", color.new(C_GRID, 100), display = display.none)
+pExitLo  = plot(inpBands ? -inpExitThr  : na, "", color.new(C_GRID, 100), display = display.none)
+pEnterLo = plot(inpBands ? -inpEnterThr : na, "", color.new(C_GRID, 100), display = display.none)
+fill(pEnterHi, pExitHi, color.new(C_BULL, 92), title = "Bull hysteresis band")
+fill(pExitLo, pEnterLo, color.new(C_BEAR, 92), title = "Bear hysteresis band")
+
+hline(0,  "Zero",  color.new(C_NEUT, 30), hline.style_solid,  1)
+hline( 1, "+1",    color.new(C_GRID, 55), hline.style_dotted, 1)
+hline(-1, "-1",    color.new(C_GRID, 55), hline.style_dotted, 1)
+
+// Two-sided pressure ladder. Areas carry the weight; lines give the edge definition.
+pBull = plot(inpShowLadder ? Bull  : na, "Bull pressure", color.new(C_BULL, 12), 2,
+     inpLadderF ? plot.style_area : plot.style_line, display = display.none)
+pBear = plot(inpShowLadder ? -Bear : na, "Bear pressure", color.new(C_BEAR, 12), 2,
+     inpLadderF ? plot.style_area : plot.style_line, display = display.none)
+
+pZero = plot(0.0, "", color.new(C_NEUT, 100), display = display.none)
+fill(pBull, pZero, color.new(C_BULL, 86), title = "Bull fill")
+fill(pBear, pZero, color.new(C_BEAR, 86), title = "Bear fill")
+
+// Per-bar contribution as faint columns behind the smoothed envelope — shows the raw
+// impulse the EMA is absorbing, and makes the smoothing lag visible instead of implicit.
+plot(inpShowImp ? bullRaw  : na, "Bull impulse", color.new(C_BULL, 55), 1, plot.style_columns)
+plot(inpShowImp ? -bearRaw : na, "Bear impulse", color.new(C_BEAR, 55), 1, plot.style_columns)
+
+// DIRECTION. Coloured by sign, widened so it reads as the primary series.
+plot(inpShowBal ? Balance : na, "Balance — DIRECTION",
+     Balance > inpExitThr ? C_BULL : Balance < -inpExitThr ? C_BEAR : C_NEUT, 3)
+plot(inpTrace == "Balance + DPS" ? DPS : na, "DPS", color.new(C_ACC, 40), 1)
+
+// ── ribbons ────────────────────────────────────────────────────────────────────────────
+// State ribbon: opacity encodes confidence, so a washed-out band is a low-conviction
+// read even when the state name sounds decisive. Provisional states render fainter still.
+int ribAlpha = int(math.max(20.0, math.min(88.0, 88.0 - 62.0 * Confidence))) + (provisional ? 8 : 0)
+bA = plot(inpRibbon ? -1.06 : na, "", color.new(C_NEUT, 100), display = display.none)
+bB = plot(inpRibbon ? -1.20 : na, "", color.new(C_NEUT, 100), display = display.none)
+bC = plot(inpRibbon and inpShowQuad ? -1.34 : na, "", color.new(C_NEUT, 100), display = display.none)
+fill(bA, bB, color = color.new(f_stateColorV2(state), ribAlpha), title = "State ribbon")
+fill(bB, bC, color = color.new(quadColorV2, 58), title = "Regime ribbon")
+
+// ── fade tapes, top of pane ────────────────────────────────────────────────────────────
+// Same visual grammar as the ribbons below the zero line, mirrored above it: two equal
+// tapes of equal height and equal gap, so the pane reads as a symmetric sandwich —
+// signals on top, market state underneath, pressure in the middle.
+// Filled = a position; hollow/washed = flat. Green long, red short.
+// hline is NOT usable here: fill() between two hlines takes only a CONSTANT colour, and
+// these tapes must recolour every bar. Pine also cannot fill between an hline and a plot,
+// so the existing +-1 hlines cannot serve as a boundary either. Plots it is — but the two
+// tapes SHARE their inner edge, so two bands cost three plots rather than four.
+tA = plot(inpShowFade ? 1.34 : na, "", color.new(C_NEUT, 100), display = display.none)
+tB = plot(inpShowFade ? 1.20 : na, "", color.new(C_NEUT, 100), display = display.none)
+tC = plot(inpShowFade ? 1.06 : na, "", color.new(C_NEUT, 100), display = display.none)
+fill(tA, tB, color = color.new(clvFade > 0 ? C_BULL : clvFade < 0 ? C_BEAR : C_NEUT,
+     clvFade == 0 ? 90 : 30), title = "CLV fade tape")
+fill(tB, tC, color = color.new(wickFade > 0 ? C_BULL : wickFade < 0 ? C_BEAR : C_NEUT,
+     wickFade == 0 ? 90 : 30), title = "Wick fade tape")
+
+// Tape identifiers at the right edge — all four bands, top and bottom, so nothing in the
+// pane needs decoding. Each is live-coloured: the signal tapes take their position colour,
+// the state and regime tags take theirs, so the label repeats the band's own reading.
+var label lTapeClv  = na
+var label lTapeWick = na
+var label lTapeStat = na
+var label lTapeQuad = na
+if barstate.islast
+    lTapeClv  := f_paneTag(lTapeClv,  1.27, "CLV",
+         clvFade  > 0 ? C_BULL : clvFade  < 0 ? C_BEAR : C_SOFT, inpShowFade)
+    lTapeWick := f_paneTag(lTapeWick, 1.13, "WICK",
+         wickFade > 0 ? C_BULL : wickFade < 0 ? C_BEAR : C_SOFT, inpShowFade)
+    lTapeStat := f_paneTag(lTapeStat, -1.13, f_stateName(state),
+         f_stateColorV2(state), inpRibbon)
+    lTapeQuad := f_paneTag(lTapeQuad, -1.27, quadName, quadColorV2,
+         inpRibbon and inpShowQuad)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  MAIN CHART
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+bgcolor(tintOn ? color.new(f_stateColorV2(state), provisional ? 95 : 90) : na,
+     title = "State tint", force_overlay = true)
+
+// MODIFIED: every gate below is resolved in the environment section, master included.
+pVah = plot(vaOn ? vah : na, "VAH", color.new(C_VA, 35), 1, plot.style_linebr,
+     force_overlay = true, display = display.pane + display.price_scale)
+pVal = plot(vaOn ? val : na, "VAL", color.new(C_VA, 35), 1, plot.style_linebr,
+     force_overlay = true, display = display.pane + display.price_scale)
+fill(pVah, pVal, color.new(C_VA, 93), title = "Value area band")
+plot(pocOn ? poc : na, "POC", color.new(C_POC, 0), 2, plot.style_linebr,
+     force_overlay = true, display = display.pane + display.price_scale)
+plot(vwapOn ? vwapV : na, "VWAP", color.new(C_VWAP, 0), 1,
+     plot.style_linebr, force_overlay = true, display = display.pane + display.price_scale)
+
+var line lnIbH = na
+var line lnIbL = na
+if ibOn
+    if newSession
+        lnIbH := line.new(bar_index, ibh, bar_index, ibh, xloc.bar_index, extend.none,
+             C_IB, line.style_dashed, 1, force_overlay = true)
+        lnIbL := line.new(bar_index, ibl, bar_index, ibl, xloc.bar_index, extend.none,
+             C_IB, line.style_dashed, 1, force_overlay = true)
+    else if not na(lnIbH)
+        line.set_xy1(lnIbH, line.get_x1(lnIbH), ibh)
+        line.set_xy2(lnIbH, bar_index, ibh)
+        line.set_xy1(lnIbL, line.get_x1(lnIbL), ibl)
+        line.set_xy2(lnIbL, bar_index, ibl)
+
+// ── VOLUME PROFILE HISTOGRAM  (added) ──────────────────────────────────────────────────
+// vpKey / vpVol have always carried this distribution; only the three derived levels were
+// ever drawn. This renders the distribution itself, so POC and the value area can be read
+// against the shape that produced them rather than taken on trust.
+//
+// No new state: pocVol is already maintained as the running maximum bin volume, and
+// value-area membership is tested against the existing val / vah PRICES rather than
+// re-deriving bin indices — so the model is untouched.
+//
+// Handle discipline matches f_tag. barstate.islast fires on every live tick, so the boxes
+// must be deleted before redraw or they stack until max_boxes_count evicts them.
+//
+// Drawn BEFORE the right-edge label block below: TradingView paints in creation order, so
+// anything created after a box sits on top of it. Labels must come last.
+//
+// Volume-off mode needs no special case — Layer 6 already deposits 1.0 per bar when
+// volOff, so this renders as a TPO / time-at-price distribution automatically.
+var array<box> vpBoxes = array.new<box>()
+
+if barstate.islast
+    for b in vpBoxes
+        box.delete(b)
+    array.clear(vpBoxes)
+    if vpOn and not na(vpBin) and vpBin > 0 and pocVol > 0
+        int nB = array.size(vpKey)
+        int drawn = 0
+        if nB > 0
+            for i = 0 to nB - 1
+                if drawn >= 470
+                    break
+                float v = array.get(vpVol, i)
+                int   w = int(math.round(inpVpWidth * v / pocVol))
+                if w > 0
+                    int   k     = array.get(vpKey, i)
+                    float yB    = k * vpBin
+                    float yT    = yB + vpBin * 0.85
+                    float pc    = (k + 0.5) * vpBin
+                    bool  isPoc = not na(pocKey) and k == pocKey
+                    bool  inVa  = not na(vah) and not na(val) and pc >= val and pc <= vah
+                    color bc    = isPoc ? color.new(C_POC, 30) : inVa ? color.new(C_VA, 62) : color.new(C_NEUT, 82)
+                    array.push(vpBoxes, box.new(bar_index + 3, yT, bar_index + 3 + w, yB,
+                         xloc = xloc.bar_index, border_color = na, bgcolor = bc,
+                         force_overlay = true))
+                    drawn += 1
+
+// Right-edge labels: four unlabelled lines force the reader to decode them every time.
+var label lPoc  = na
+var label lVah  = na
+var label lVal  = na
+var label lVwap = na
+var label lIbh  = na
+var label lIbl  = na
+if barstate.islast
+    lPoc  := f_tag(lPoc,  poc,   "POC",  C_POC,  pocOn)
+    lVah  := f_tag(lVah,  vah,   "VAH",  C_VA,   vaOn)
+    lVal  := f_tag(lVal,  val,   "VAL",  C_VA,   vaOn)
+    lVwap := f_tag(lVwap, vwapV, "VWAP", C_VWAP, vwapOn)
+    lIbh  := f_tag(lIbh,  ibh,   "IBH",  C_IB,   ibOn)
+    lIbl  := f_tag(lIbl,  ibl,   "IBL",  C_IB,   ibOn)
+
+plotshape(transOn and transitioned, "State transition", shape.diamond, location.abovebar,
+     color.new(f_stateColorV2(state), 15), size = size.tiny, force_overlay = true)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  TABLE
+//  Every driver that moved the classification is shown with its value AND a meter, so the
+//  reasoning is legible at a glance. When the engine is wrong you can see which input
+//  made it wrong — the difference between a tool you can improve and one you stop trusting.
+//  NOTE: if your TradingView build rejects force_overlay on table.new, delete that one
+//  argument and the table renders in the indicator's own pane instead.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+bool tblOn   = inpTblSize != "Off" and inpShowTable
+bool tblFull = inpTblSize == "Full"
+
+var table tb = table.new(position.top_right, 3, 25, bgcolor = C_PANEL,
+     frame_color = C_GRID, frame_width = 1, border_color = color.new(C_NEUT, 88),
+     border_width = 1, force_overlay = true)
+
+f_row(int r, string k, string v, string meter, color col) =>
+    table.cell(tb, 0, r, k, text_color = C_SOFT, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = col, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(tb, 2, r, meter, text_color = color.new(col, 25), text_size = size.tiny, text_halign = text.align_left)
+
+f_sep(int r, string label) =>
+    table.cell(tb, 0, r, label, text_color = color.new(C_NEUT, 30), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(tb, 1, r, "", text_color = C_SOFT, text_size = size.tiny)
+    table.cell(tb, 2, r, "", text_color = C_SOFT, text_size = size.tiny)
+
+if tblOn and barstate.islast
+    int    n0 = array.get(stN, state)
+    float  s0 = array.get(stSum,  state)
+    float  mu = n0 > 0 ? s0 / float(n0) : na
+    color  sc = f_stateColorV2(state)
+
+    // headline
+    table.cell(tb, 0, 0, " " + f_stateName(state), text_color = sc, text_size = size.normal,
+         text_halign = text.align_left, bgcolor = color.new(sc, 86))
+    table.cell(tb, 1, 0, "", bgcolor = color.new(sc, 86))
+    table.cell(tb, 2, 0, str.tostring(Confidence * 100, "#") + "% ", text_color = sc,
+         text_size = size.tiny, text_halign = text.align_right, bgcolor = color.new(sc, 86))
+    table.cell(tb, 0, 1, provisional ? "→ " + f_stateName(cand) : "held " + str.tostring(barsInSt) + " bars",
+         text_color = provisional ? C_GOLD : C_SOFT, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(tb, 1, 1, quadName, text_color = quadColorV2, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(tb, 2, 1, "", text_color = C_SOFT, text_size = size.tiny)
+
+    f_sep(2, "PRESSURE")
+    f_row(3, "Balance", str.tostring(Balance, "#.##"), f_meterSigned(Balance, 5),
+          Balance > 0 ? C_BULL : Balance < 0 ? C_BEAR : C_NEUT)
+    f_row(4, "Confidence", str.tostring(Confidence * 100, "#") + "%", f_meter(Confidence, 10), C_ACC)
+    f_row(5, "Intensity", str.tostring(Intensity * 100, "#") + "%", f_meter(Intensity, 10), C_ACC)
+
+    if tblFull
+        f_sep(6, "FADE SIGNALS")
+        f_row(7, "CLV fade",
+              clvFade > 0 ? "LONG" : clvFade < 0 ? "SHORT" : "flat",
+              f_meterSigned(math.max(-1.0, math.min(1.0, clvSm / 0.6)), 5),
+              clvFade > 0 ? C_BULL : clvFade < 0 ? C_BEAR : C_SOFT)
+        f_row(8, "Wick fade",
+              wickFade > 0 ? "LONG" : wickFade < 0 ? "SHORT" : "flat",
+              f_meterSigned(math.max(-1.0, math.min(1.0, wickSm / 0.6)), 5),
+              wickFade > 0 ? C_BULL : wickFade < 0 ? C_BEAR : C_SOFT)
+
+        f_sep(9, "DRIVERS")
+        f_row(10, "Body rank (side)", str.tostring(magRank * 100, "#") + "%", f_meter(magRank, 10), C_INK)
+        f_row(11, "Intrabar eff", str.tostring(prIntra * 100, "#") + "%", f_meter(prIntra, 10), C_INK)
+        f_row(12, "Interbar eff", str.tostring(prInter * 100, "#") + "%", f_meter(prInter, 10), C_INK)
+        f_row(13, "Excess volume", volOff ? "off" : str.tostring(excessV, "#.##"),
+              volOff ? "" : f_meterSigned(math.max(-1.0, math.min(1.0, excessV / 3.0)), 5), C_INK)
+        f_row(14, "Divergence", inpDivOn ? str.tostring(divScore, "#.##") : "off",
+              inpDivOn ? f_meterSigned(divScore, 5) : "", math.abs(divScore) > 0.4 ? C_VIOLET : C_INK)
+
+        f_sep(15, "AUCTION CONTEXT")
+        f_row(16, "Location",
+              not ctxEnabled or na(vah) ? "—" :
+              locState == 1 ? (accepted ? "above · accepted" : "above value") :
+              locState == -1 ? (accepted ? "below · accepted" : "below value") : "inside value",
+              not ctxEnabled or na(vah) ? "" : str.tostring(distValue, "#.#") + " ATR",
+              locState == 1 ? C_BULL : locState == -1 ? C_BEAR : C_NEUT)
+        f_row(17, "Node at price", not ctxEnabled or na(vah) ? "—" : str.tostring(nodeRel, "#.##") + "×",
+              not ctxEnabled or na(vah) ? "" : (nodeRel > 1.4 ? "HVN · absorb" : nodeRel < 0.6 ? "LVN · fast" : "typical"), C_INK)
+        f_row(18, "Initial Balance",
+              not ibOn or na(ibh) ? "—" : ibLoc == 1 ? "above" : ibLoc == -1 ? "below" : "inside",
+              not ibOn or na(ibWidth) ? "" : str.tostring(ibWidth, "#.#") + " ATR wide"
+                   + (ibActive ? " · forming" : ""),
+              ibLoc == 1 ? C_BULL : ibLoc == -1 ? C_BEAR : C_NEUT)
+        f_row(19, "Value overlap", na(vaOverlap) ? "—" : str.tostring(vaOverlap * 100, "#") + "%",
+              na(vaOverlap) ? "" : f_meter(vaOverlap, 10), C_INK)
+        // MEASURED: rwa correlates 0.95 with the plain wick ratio (dnWick-upWick)/range.
+        // The Rogers-Satchell derivation is theoretically cleaner but adds no independent
+        // information — shown as a diagnostic, deliberately not fed into the score.
+        f_row(20, "Rejection (RWA)", str.tostring(rwa, "#.##"), f_meterSigned(rwa, 5), C_INK)
+        f_row(21, "POC vs prior session",
+              ctxEnabled and not na(poc) ? (pocMigration >= 0 ? "+" : "") + str.tostring(pocMigration, "#.#") + " ATR" : "—", "", C_INK)
+        f_row(22, "VWAP vs POC",
+              vwapEnabled and not na(poc) ? (vwapPocSpread >= 0 ? "+" : "") + str.tostring(vwapPocSpread, "#.#") + " ATR" : "—", "", C_INK)
+
+    // Self-validation stats, folded into the normal 3-column row shape. The previous
+    // single-cell footer held a ~70-character sentence, which forced column 0 to that
+    // width and stretched the whole table.
+    int rStats = tblFull ? 23 : 9
+    f_row(rStats, "Next " + str.tostring(inpValH) + " bars, this state",
+          n0 > 20 ? (mu >= 0 ? "+" : "") + str.tostring(mu, "#.##") + " ATR" : "—",
+          "",
+          n0 > 20 and mu > 0 ? C_BULL : n0 > 20 and mu < 0 ? C_BEAR : C_SOFT)
+
+// ───────────────────────────────────────────────────────────────────────────────────────
+//  ALERTS — on state TRANSITIONS, not level crossings. That is where the information is,
+//  and it is far less noisy.
+// ───────────────────────────────────────────────────────────────────────────────────────
+
+// Alerts fire on DESCRIPTIVE conditions and on the two validated fade signals.
+// The old trend-entry alerts were removed: alerting on "BULL TREND" is an invitation to
+// trade a direction measured at Sharpe -0.73.
+alertcondition(transitioned, "MSBP · State change", "MSBP state changed on {{ticker}} {{interval}}")
+alertcondition(transitioned and state == S_FAILBRK, "MSBP · Failed break", "MSBP: excursion beyond value with no acceptance, returned")
+alertcondition(transitioned and state == S_CONTEST, "MSBP · Contested", "MSBP: high participation, no net progress — stand aside")
+alertcondition(ta.change(clvFade)  != 0, "MSBP · CLV fade flip",  "MSBP: CLV fade signal changed on {{ticker}} {{interval}}")
+alertcondition(ta.change(wickFade) != 0, "MSBP · Wick fade flip", "MSBP: wick fade signal changed on {{ticker}} {{interval}}")
