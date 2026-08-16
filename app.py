@@ -86,12 +86,14 @@ from universe import (
     resolve_universe,
     render_universe_selector,
 )
-from nco import compute_nco_portfolio
+from nco import (compute_nco_portfolio, METHOD_SPECS, METHOD_ORDER, method_spec,
+                 MOMENTUM_LOOKBACK, MOMENTUM_SKIP)
 
 try:
     from charts import (
         COLORS,
         create_risk_allocation_heatmap,
+        create_risk_contribution_chart,
         create_cluster_correlation_heatmap,
         create_regime_history_chart,
     )
@@ -218,14 +220,27 @@ _REGIME_LOOKBACK_FILES = 100
 # session) only when a run actually needs it.
 _CALIBRATION_LOOKBACK_FILES = 375
 
-# The two portfolio styles, mapped to the method name compute_nco_portfolio
-# expects. Both travel the identical pipeline — same eligibility filter, same
+# Portfolio styles, derived from nco.METHOD_SPECS rather than hardcoded here.
+# Every style travels the identical pipeline — same eligibility filter, same
 # clustering diagnostics, same risk decomposition — so any difference on screen
 # is the allocator and nothing else.
-_NCO_STYLES = {
-    "Risk Parity (HRP)": "HRP",
-    "Equal Weight":      "EQUAL",
-}
+#
+# Built from the registry so adding or retiring a style is a one-line change in
+# nco.py. The previous hardcoded dict had to be kept in sync with six other
+# `curation == "EQUAL"` checks scattered through this file; those are now all
+# registry lookups.
+_NCO_STYLES = {METHOD_SPECS[k]["label"]: k for k in METHOD_ORDER}
+_STYLE_LABELS = list(_NCO_STYLES.keys())
+
+
+def _style_spec(ctx_or_method) -> dict:
+    """Registry record for a run context, a method code, or a style label."""
+    if isinstance(ctx_or_method, dict):
+        key = ctx_or_method.get("curation", "EQUAL")
+    else:
+        key = ctx_or_method
+    key = _NCO_STYLES.get(str(key), str(key))
+    return method_spec(key)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -340,8 +355,7 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
     structure, so that is what the table and heatmaps show.
     """
     _rc = st.session_state.get("run_context") or {}
-    _method = _rc.get("curation", "HRP")
-    _label = "Equal Weight" if _method == "EQUAL" else "Hierarchical Risk Parity"
+    _label = _style_spec(_rc)["label"]
     render_section_header(
         "Curated Portfolio Holdings",
         f"{len(portfolio)} positions · {_label}",
@@ -484,18 +498,54 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
     if not CHARTS_AVAILABLE:
         return
 
+    _at = portfolio.attrs if hasattr(portfolio, "attrs") else {}
+    _rc_target = _at.get("nco_rc_target", "none")
+    _mspec = _style_spec(st.session_state.get("run_context") or {})
+
     _section_divider()
     render_section_header(
-        "Risk Profile", "Per-holding, column-relative · green = calm and diversifying",
+        "Risk Profile",
+        f"Per-holding, row-relative · scored against {_mspec['short']}'s own objective",
         icon="activity", accent="emerald")
     st.plotly_chart(create_risk_allocation_heatmap(df), width="stretch",
                     key="risk_alloc_heatmap")
+    # What "green" means is method-dependent, so the caption must be too. Telling
+    # an HRP user that green means "risk share near 1/N" would be wrong: HRP
+    # balances across clusters, not holdings.
     st.caption(
-        "Each column is scored against its own peers, oriented so **green is the calm, "
-        "diversifying end** — low volatility, high independence, and a weight or risk share "
-        "close to its equal portion rather than a concentration. A well-balanced book reads "
-        "as an even green field. Any red column on a holding means it is carrying more risk "
-        "than its capital share implies."
+        "Each row is scored against its own peers, oriented so **green is the calm, "
+        "diversifying end** — low volatility, high independence. "
+        + ("Because this style targets **equal risk contribution**, green on the risk row "
+           "means a holding sitting *at* its equal share; any red is a name the selection "
+           "or the position cap pulled off target."
+           if _rc_target == "equal" else
+           "This style does not target equal risk contribution, so green on the risk row "
+           "simply means a holding carrying *less* variance than its capital share — the gap "
+           "between the Weight and Risk rows is the risk this method leaves unbalanced.")
+    )
+
+    _section_divider()
+    render_section_header(
+        "Risk Contribution", "Capital share vs variance share, on one scale",
+        icon="bar-chart-2", accent="amber")
+    st.plotly_chart(create_risk_contribution_chart(df), width="stretch",
+                    key="risk_contrib_chart")
+    st.caption(
+        {
+            "equal": ("Grey is capital, coloured is variance. This style solves for **flat** "
+                      "risk bars on the dashed equal-share line — the header reports the "
+                      "solver's own dispersion (target 0.000) separately from the realised "
+                      "figure, because top-N selection and the position cap move the held "
+                      "book away from the solution."),
+            "cluster": ("Grey is capital, coloured is variance. Uneven risk bars are **expected** "
+                        "here: HRP balances risk across *clusters*, not across individual "
+                        "holdings, so a small risk share inside a large cluster is a correct "
+                        "outcome rather than an imbalance."),
+        }.get(_rc_target,
+              "Grey is capital, coloured is variance. This style does not manage risk "
+              "contribution at all — the spread of the coloured bars is simply where the "
+              "covariance puts the variance, and the distance between the two series is the "
+              "argument for risk-based weighting.")
     )
 
     corr = portfolio.attrs.get("corr_matrix")
@@ -504,17 +554,23 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
         _section_divider()
         k = portfolio.attrs.get("nco_clusters", 0)
         sil = portfolio.attrs.get("nco_silhouette", 0.0)
+        _clusters_drive = bool(portfolio.attrs.get("nco_uses_clusters", False))
         render_section_header(
             "Risk Structure",
-            f"Correlation matrix ordered by cluster · {k} clusters · silhouette {sil:.2f}",
+            f"Correlation matrix ordered by cluster · {k} clusters · silhouette {sil:.2f}"
+            + ("" if _clusters_drive else " · diagnostic only"),
             icon="layers", accent="violet")
         st.plotly_chart(create_cluster_correlation_heatmap(corr, labels),
                         width="stretch", key="cluster_corr_heatmap")
         st.caption(
             "Blocks along the diagonal are groups that move together — one bet wearing several "
-            "tickers. Amber rules mark the cluster boundaries the allocator used. Crisp blocks "
-            "mean the clustering found real structure; a uniformly warm matrix means the universe "
-            "is effectively a single bet, which no allocator can fix."
+            "tickers. Amber rules mark the cluster boundaries. Crisp blocks mean the clustering "
+            "found real structure; a uniformly warm matrix means the universe is effectively a "
+            "single bet, which no allocator can fix. "
+            + ("These are the boundaries the allocator actually **used** to split capital."
+               if _clusters_drive else
+               "This style does **not** allocate from the cluster tree — the matrix is shown so "
+               "you can see the structure the weights were computed against.")
         )
 
 
@@ -756,18 +812,26 @@ def _render_system_tab(training_window: List):
     _pf = st.session_state.get("portfolio")
     _at = _pf.attrs if _pf is not None and hasattr(_pf, "attrs") else {}
     _style = _ctx.get("investment_style", "—")
-    _equal = _ctx.get("curation") == "EQUAL"
+    _spec = _style_spec(_ctx)
     _max_eff = _at.get("max_pos_pct_eff", st.session_state.max_pos_pct)
     _max_relaxed = abs(_max_eff - st.session_state.max_pos_pct) > 1e-9
+    _disp = _at.get("nco_rc_dispersion")
+    _solved = _at.get("nco_rc_dispersion_solved")
     details = {
         "Version": VERSION,
         "Portfolio Style": _style,
-        "Curation Method": ("Equal weight (1/N)" if _equal
-                            else "Hierarchical Risk Parity (covariance)"),
-        "Weight Formula": ("1 / N" if _equal
-                           else "recursive bisection on cluster variance"),
+        "Curation Method": f"{_spec['label']} ({_spec['family']})",
+        "Weight Formula": _spec["formula"],
         "Risk Clusters": f"{_at.get('nco_clusters', '—')} "
-                         f"(silhouette {_at.get('nco_silhouette', 0):.2f})",
+                         f"(silhouette {_at.get('nco_silhouette', 0):.2f})"
+                         + ("" if _spec["uses_clusters"] else " — diagnostic only"),
+        "Risk Balance": (
+            f"dispersion {_disp:.3f}"
+            + (f" (solved {_solved:.3f})" if _solved is not None
+               and _spec["rc_target"] == "equal" else "")
+            + (" · target 0.000" if _spec["rc_target"] == "equal" else " · not targeted")
+            if _disp is not None else "—"),
+        "Risk Concentration": f"{_at.get('nco_rc_concentration', 0):.2f}x equal share",
         "Estimation Window": f"{_at.get('nco_obs', 0)} daily observations",
         "Ex-ante Volatility": f"{_at.get('nco_port_vol_ann', 0):.2%}",
         "Max Position": f"{_max_eff*100:.1f}%" + (" (relaxed)" if _max_relaxed else ""),
@@ -788,7 +852,7 @@ def _render_system_tab(training_window: List):
     # ── Methodology ───────────────────────────────────────────────────────────
     render_section_header("Methodology", "How a portfolio is curated",
                           icon="target", accent="emerald")
-    _m_equal = (st.session_state.get("run_context") or {}).get("curation") == "EQUAL"
+    _m_spec = _style_spec(st.session_state.get("run_context") or {})
     method_html = (
         '<div class="intel-method-card">'
             '<div class="intel-method-header">'
@@ -815,25 +879,36 @@ def _render_system_tab(training_window: List):
                 '<div class="intel-method-tile tile-how">'
                     '<div class="tile-label">Allocate</div>'
                     '<div class="tile-body">'
-                        + ('Equal weight: every selected holding receives an identical '
-                           '<code>1/N</code> share, ignoring the covariance entirely. Shown '
-                           'alongside the cluster structure so the risk it leaves unbalanced '
-                           'is visible.' if _m_equal else
-                           'Hierarchical Risk Parity: recursive bisection splits capital between '
-                           'sub-clusters in inverse proportion to their variance. No matrix is '
-                           'inverted, which is what makes it robust when correlations are high '
-                           'and the sample is short.')
+                        + {
+                            "EQUAL": ('Equal weight: every selected holding receives an identical '
+                                      '<code>1/N</code> share, ignoring the covariance entirely. '
+                                      'Shown alongside the cluster structure so the risk it leaves '
+                                      'unbalanced is visible.'),
+                            "ERC": ('Equal Risk Contribution: weights are solved by cyclical '
+                                    'coordinate descent so that <code>w<sub>i</sub> &times; '
+                                    '(&Sigma;w)<sub>i</sub></code> is identical for every holding '
+                                    '&mdash; each name contributes the same share of portfolio '
+                                    'variance. Nothing is inverted, and the Risk Contribution chart '
+                                    'shows directly whether the solver reached its target.'),
+                            "HRP": ('Hierarchical Risk Parity: recursive bisection splits capital '
+                                    'between sub-clusters in inverse proportion to their variance. '
+                                    'No matrix is inverted, which is what makes it robust when '
+                                    'correlations are high and the sample is short.'),
+                            "MAXDIV": ('Maximum Diversification: maximises the ratio of weighted '
+                                       'average volatility to portfolio volatility. Solved on the '
+                                       'correlation matrix by projected gradient, then rescaled by '
+                                       '<code>1/&sigma;</code>. Produces the lowest beta of the set '
+                                       'and, by design, concentrated books.'),
+                          }.get(_m_spec["short"] if _m_spec["short"] in ("ERC", "HRP", "MAXDIV", "EQUAL")
+                                else "EQUAL", _m_spec["formula"])
                     + '</div>'
                 '</div>'
 
                 '<div class="intel-method-tile tile-obj">'
                     '<div class="tile-label">What it targets</div>'
                     '<div class="tile-body">'
-                        'Risk, not return. Measured across two disjoint periods, HRP gave up '
-                        '~1%/yr against equal weight and cut volatility and drawdown by ~20%. '
-                        'It is a volatility-reduction overlay &mdash; do not size it expecting '
-                        'excess return.'
-                    '</div>'
+                        + _m_spec["evidence"].replace("--", "&mdash;")
+                    + '</div>'
                 '</div>'
 
                 '<div class="intel-method-tile tile-safety">'
@@ -1224,10 +1299,13 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     #
     # Suppressed on Equal Weight runs, where the trace would draw the portfolio
     # line twice.
-    _style = _run_ctx.get("investment_style", "Risk Parity (HRP)")
+    _style = _run_ctx.get("investment_style", "Equal Weight")
     _eq_capital = float(_run_ctx.get("capital") or st.session_state.get("capital") or 0.0)
     _alt_units: Optional[Tuple[float, ...]] = None
-    if _style != "Equal Weight" and _eq_capital > 0 and "price" in portfolio.columns:
+    # Drawn for every style EXCEPT equal weight itself, where the trace would
+    # draw the portfolio line twice. Keyed off the registry code rather than the
+    # display label so renaming a style cannot silently re-enable the duplicate.
+    if _run_ctx.get("curation") != "EQUAL" and _eq_capital > 0 and "price" in portfolio.columns:
         _n = len(portfolio)
         _per_pos = _eq_capital / _n if _n else 0.0
         _prices = pd.to_numeric(portfolio["price"], errors="coerce")
@@ -1513,7 +1591,7 @@ def _render_header() -> None:
     """Render the main masthead header."""
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Covariance-Based Portfolio Curation · Hierarchical Risk Parity · Live NSE Data"
+        tagline="Covariance-Based Portfolio Curation · Equal Weight · ERC · HRP · Live NSE Data"
     )
 
 
@@ -1531,8 +1609,8 @@ def _render_landing_page():
                         "exposures.",
             specs=[
                 ("Cluster", "Ward linkage on correlation distance"),
-                ("Allocate", "Recursive bisection on cluster variance"),
-                ("Styles", "Risk Parity (HRP) · Equal Weight"),
+                ("Allocate", "1/N · equal risk contribution · cluster bisection"),
+                ("Styles", " · ".join(METHOD_SPECS[k]["short"] for k in METHOD_ORDER)),
                 ("Targets", "Volatility & drawdown, not excess return"),
             ],
             card_class="portfolio",
@@ -1821,8 +1899,20 @@ def _run_analysis(
         metrics.start_phase("curation")
         if investment_style in _NCO_STYLES:
             _method = _NCO_STYLES[investment_style]
-            progress_bar(progress_container, 40, "Clustering Risk Structure",
-                         f"{_method} · correlation-distance hierarchy")
+            _spec = method_spec(_method)
+            # The 40% milestone names what this method is actually doing. The old
+            # copy said "Clustering Risk Structure" for every style, which was
+            # wrong for three of the four: only HRP derives its weights from the
+            # cluster tree. Clustering still RUNS for all of them (the correlation
+            # diagnostic is shown regardless), it just isn't the allocation step.
+            _stage40 = {
+                "EQUAL":  ("Measuring Risk Structure", "1/N · clustering for diagnostics only"),
+                "ERC":    ("Solving Equal Risk Contribution", "cyclical coordinate descent"),
+                "HRP":    ("Clustering Risk Structure", "correlation-distance hierarchy"),
+                "MAXDIV": ("Maximising Diversification Ratio", "projected gradient, long-only"),
+            }.get(_method, ("Measuring Risk Structure", _spec["formula"]))
+            progress_bar(progress_container, 40, _stage40[0],
+                         f"{_spec['short']} · {_stage40[1]}")
             try:
                 _cur = st.session_state.current_df
                 _prices = {
@@ -1838,14 +1928,20 @@ def _run_analysis(
                 _nco_hist = _load_historical_data(
                     selected_date, _CALIBRATION_LOOKBACK_FILES, symbols_key
                 ) or all_hist
-                progress_bar(progress_container, 60, "Allocating Across Clusters",
-                             f"{len(_prices)} symbols · {_method}")
+                _stage60 = ("Allocating Across Clusters" if _spec["uses_clusters"]
+                            else "Balancing Risk Contributions" if _spec["rc_target"] == "equal"
+                            else "Sizing Positions")
+                progress_bar(progress_container, 60, _stage60,
+                             f"{len(_prices)} symbols · {_spec['short']}")
                 _book = compute_nco_portfolio(
                     _nco_hist, _prices, capital, num_positions,
                     method=_method, max_pos_pct=st.session_state.max_pos_pct,
                 )
+                progress_bar(progress_container, 80, "Applying Position Cap",
+                             f"max {st.session_state.max_pos_pct*100:.0f}% · "
+                             f"{len(_book)} positions")
             except Exception as _e:
-                log.warning(f"{_method} curation failed: {type(_e).__name__}: {_e}")
+                log.warning(f"{_spec['short']} curation failed: {type(_e).__name__}: {_e}")
                 _book = pd.DataFrame()
 
             if _book.empty:
@@ -1873,10 +1969,27 @@ def _run_analysis(
             }
 
             log.section("Covariance Curation", phase="PHASE 2")
-            log.item("Method", f"{_method} · {_book.attrs.get('nco_clusters', 0)} clusters "
-                               f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})")
+            log.item("Method", f"{_spec['label']} [{_spec['short']}] · {_spec['family']}")
+            log.item("Weight formula", _spec["formula"])
             log.item("Estimation", f"{_book.attrs.get('nco_obs', 0)} daily observations · "
                                    f"{_book.attrs.get('nco_universe', 0)} symbols")
+            log.item("Clustering", f"{_book.attrs.get('nco_clusters', 0)} clusters "
+                                   f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})"
+                                   + ("" if _spec["uses_clusters"] else " · diagnostic only"))
+            # Risk balance is the number that says whether the method achieved
+            # what it targets. Dispersion is the coefficient of variation of the
+            # risk contributions: 0.00 is perfect equal-risk.
+            _disp = _book.attrs.get("nco_rc_dispersion", float("nan"))
+            _conc = _book.attrs.get("nco_rc_concentration", float("nan"))
+            log.item("Risk balance", f"dispersion {_disp:.3f} "
+                                     f"({'target 0.00' if _spec['rc_target'] == 'equal' else 'not targeted'})"
+                                     f" · concentration {_conc:.2f}x equal share")
+            if _spec["uses_momentum"]:
+                log.item("Momentum tilt",
+                         f"{_book.attrs.get('nco_momentum_names', 0)} names scored "
+                         f"({MOMENTUM_LOOKBACK}-{MOMENTUM_SKIP} window) · "
+                         f"lambda {_book.attrs.get('nco_momentum_lambda', 0):.2f}"
+                         + ("" if _book.attrs.get("nco_momentum_applied") else " · NOT APPLIED"))
             log.item("Positions", f"{len(_book)} curated · ex-ante vol "
                                   f"{_book.attrs.get('nco_port_vol_ann', 0):.2%}")
             metrics.end_phase("curation", success=True)
@@ -1885,12 +1998,15 @@ def _run_analysis(
             metrics.portfolios_generated = len(_book)
             metrics.end_phase("total_execution", success=True)
             progress_bar(progress_container, 100, "Analysis Complete",
-                         f"{len(_book)} positions · {_method}")
+                         f"{len(_book)} positions · {_spec['short']}")
             log.summary("Execution Summary", {
                 "Run ID": current_run_id[-12:],
-                "Curation": f"{_method} (covariance)",
+                "Curation": f"{_spec['label']} ({_spec['family']})",
+                "Weight Formula": _spec["formula"],
                 "Clusters": _book.attrs.get("nco_clusters", 0),
                 "Positions Selected": len(_book),
+                "Risk Dispersion": f"{_book.attrs.get('nco_rc_dispersion', 0):.3f}",
+                "Risk Concentration": f"{_book.attrs.get('nco_rc_concentration', 0):.2f}x",
                 "Ex-ante Vol": f"{_book.attrs.get('nco_port_vol_ann', 0):.2%}",
                 "Status": "SUCCESS",
             })
@@ -1961,27 +2077,40 @@ def main():
         # 2. Portfolio Style
         st.markdown('<div class="sidebar-title">Portfolio Style</div>', unsafe_allow_html=True)
         investment_style = st.selectbox(
-            # Not "Investment Objective": neither option expresses an objective.
-            # Both are allocation methods over the same holdings, and the system
+            # Not "Investment Objective": no option here expresses an objective.
+            # All are allocation methods over the same holdings, and the system
             # forecasts no returns at all — so the honest question is HOW capital
             # is split, not what the user is trying to achieve.
             "Weighting Method",
-            options=["Risk Parity (HRP)", "Equal Weight"],
-            index=0,
+            options=_STYLE_LABELS,
+            index=0,                      # Equal Weight — nothing measured beat it
+            format_func=lambda lbl: (
+                f"{lbl}  ·  {METHOD_SPECS[_NCO_STYLES[lbl]]['family']}"),
             help=(
-                "Both styles select and weight entirely from the return covariance "
-                "structure — no return forecast is made. "
-                "Risk Parity (HRP) clusters holdings by correlation and splits capital "
-                "by recursive bisection on cluster variance. Equal Weight gives every "
-                "holding an identical 1/N share. "
-                "Measured across two disjoint periods, HRP gives up about 1%/yr of "
-                "return against Equal Weight and buys roughly a 20% cut in volatility "
-                "and drawdown. It is a volatility-reduction overlay — if you are "
-                "maximising absolute return without leverage, Equal Weight is the "
-                "correct choice."
+                "Every style selects and weights entirely from the return covariance "
+                "structure — no return forecast is made anywhere.\n\n"
+                "**Equal Weight** (default) — 1/N. Across 36 candidate allocators on "
+                "three universes, nothing produced a reproducible return improvement "
+                "over it. Lowest turnover of any style.\n\n"
+                "**Equal Risk Contribution** — every holding contributes the same share "
+                "of portfolio variance. The preferred risk-reduction style: it beats HRP "
+                "on the any-date hit rate in 6 of 6 cells across two stock universes "
+                "while trading ~5x less. It gives up ~0.5%/yr of return against Equal "
+                "Weight in exchange for lower volatility and beta 0.92.\n\n"
+                "**Risk Parity (HRP)** — clusters by correlation, splits capital by "
+                "recursive bisection. Same job as ERC but five times the turnover; kept "
+                "for continuity.\n\n"
+                "**Max Diversification** — the lowest-beta style and the strongest "
+                "lump-sum result measured (Nifty 50 alpha t = 3.41), but it lost all 115 "
+                "five-year SIP streams tested. Suits lump-sum capital near a goal date, "
+                "not monthly accumulation.\n\n"
+                "If you are maximising absolute return without leverage, Equal Weight "
+                "remains the correct choice."
             ),
             label_visibility="visible"
         )
+        _sel_spec = METHOD_SPECS[_NCO_STYLES[investment_style]]
+        st.caption(f"{_sel_spec['tagline']} · `{_sel_spec['formula']}`")
 
         # 3. Analysis Universe
         st.markdown('<div class="sidebar-title">Analysis Universe</div>', unsafe_allow_html=True)

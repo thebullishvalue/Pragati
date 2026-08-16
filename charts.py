@@ -177,27 +177,37 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
 
 
 def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
-    """Per-holding risk profile — the successor to the conviction heatmap.
+    """Per-holding risk profile, scored against THIS method's own objective.
 
-    Same idea as the signal heatmap it replaces (one row per position, one
-    column per dimension, diverging colour), but the dimensions are the ones
-    that actually drive a covariance-curated book:
+    One row per dimension, one column per holding, diverging colour:
 
       Weight        share of capital
       Risk Share    share of PORTFOLIO VARIANCE this holding contributes
       Volatility    its own annualized volatility
       Independence  1 - |correlation to the finished book|
+      Momentum      the 12-1 rank score (only for methods that tilt on it)
 
-    Colour is a within-column percentile, so each column is read against its own
-    peers rather than on incompatible absolute scales. Every column is oriented
-    so GREEN is the calm, diversifying end: low volatility, high independence,
-    and — for Weight and Risk Share — a contribution close to its equal share
-    rather than a concentration. That makes a well-balanced book read as an
-    even green field, and any red row is a position carrying more risk than its
-    capital suggests.
+    Colour is a within-row percentile, so each dimension is read against its own
+    peers rather than on incompatible absolute scales.
 
-    The gap between the Weight and Risk Share columns is the whole point of the
-    method: equal capital does NOT mean equal risk, and this is where you see it.
+    WHAT "GREEN" MEANS DEPENDS ON THE METHOD, and that is the point of scoring
+    against `nco_rc_target`. Reading every book against "risk share close to
+    1/N" is only correct when the method actually targets equal risk:
+
+      rc_target "equal"  (ERC)  — green = risk share AT its equal share. The
+                                  chart is then a direct read on whether the
+                                  solver achieved what it was asked to.
+      rc_target "cluster" (HRP) — green = risk share BELOW equal. HRP balances
+                                  across clusters, not across holdings, so a
+                                  low-risk name inside a big cluster is a
+                                  correct outcome, not an imbalance.
+      rc_target "none"   (1/N, MaxDiv) — green = risk share below equal, since
+                                  neither method manages risk contribution at
+                                  all and the honest read is simply "who is
+                                  carrying the variance".
+
+    The gap between the Weight and Risk Share rows is the whole point: equal
+    capital does NOT mean equal risk, and this is where you see it.
     """
     need = ["symbol", "weightage_pct"]
     if portfolio is None or portfolio.empty or not all(c in portfolio.columns for c in need):
@@ -205,9 +215,14 @@ def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
         fig.update_layout(**chart_layout(height=220))
         return fig
 
+    attrs = getattr(portfolio, "attrs", {}) or {}
+    rc_target = attrs.get("nco_rc_target", "none")
+    uses_momentum = bool(attrs.get("nco_uses_momentum", False))
+
     df = portfolio.copy()
     for c, default in (("risk_contribution", np.nan), ("volatility", np.nan),
-                       ("corr_to_book", np.nan), ("cluster", 0)):
+                       ("corr_to_book", np.nan), ("cluster", 0),
+                       ("momentum_z", np.nan)):
         if c not in df.columns:
             df[c] = default
     # Cluster first, then weight — so structurally similar holdings sit together
@@ -220,14 +235,23 @@ def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
     rc = pd.to_numeric(df["risk_contribution"], errors="coerce").fillna(eq_share)
     vol = pd.to_numeric(df["volatility"], errors="coerce")
     indep = 1.0 - pd.to_numeric(df["corr_to_book"], errors="coerce").abs()
+    momz = pd.to_numeric(df["momentum_z"], errors="coerce")
 
-    # Raw display values, and the "greener is better" ordering key per column.
+    # Score the risk-share row against the method's OWN objective (see docstring).
+    rc_key = -(rc - eq_share).abs() if rc_target == "equal" else -rc
+    rc_label = "Risk Share" + (" vs target" if rc_target == "equal" else "")
+
+    # Raw display values, and the "greener is better" ordering key per row.
     cols = [
         ("Weight",       w * 100.0,   -(w - eq_share).abs(), "{:.2f}%"),
-        ("Risk Share",   rc * 100.0,  -(rc - eq_share).abs(), "{:.2f}%"),
-        ("Volatility",   vol * 100.0, -vol,                   "{:.1f}%"),
-        ("Independence", indep,        indep,                 "{:.2f}"),
+        (rc_label,       rc * 100.0,  rc_key,                "{:.2f}%"),
+        ("Volatility",   vol * 100.0, -vol,                  "{:.1f}%"),
+        ("Independence", indep,        indep,                "{:.2f}"),
     ]
+    if uses_momentum and momz.notna().any():
+        # Shown only when a tilt was actually applied, so the chart never
+        # implies a factor the book does not use.
+        cols.append(("Momentum", momz, momz, "{:+.2f}"))
 
     z, text = [], []
     for _, raw, key, fmt in cols:
@@ -249,6 +273,91 @@ def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
     style_axes(fig)
     fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
     fig.update_yaxes(autorange="reversed")
+    return fig
+
+
+def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
+    """Capital share vs variance share, per holding — did the method do its job?
+
+    Two bars per holding: weight (capital) and risk contribution (variance),
+    against a dashed line at the equal share. This is the single most direct
+    read on a weighting method, and what it should look like differs by method:
+
+      ERC     the risk bars should sit FLAT on the equal-share line. Any
+              visible step means the solver did not converge, and the header
+              reports the dispersion so it cannot be missed.
+      HRP     risk bars uneven by design — it balances clusters, not holdings.
+      1/N     capital bars flat, risk bars wherever the covariance puts them.
+              The gap between the two series IS the argument for risk weighting.
+      MaxDiv  both uneven; it optimises the diversification ratio, not either
+              of these series directly.
+
+    The risk-allocation heatmap shows the same numbers as a percentile field;
+    this shows them on a shared absolute scale, where "flat" is verifiable by
+    eye rather than inferred from colour.
+    """
+    need = ["symbol", "weightage_pct"]
+    if portfolio is None or portfolio.empty or not all(c in portfolio.columns for c in need):
+        fig = go.Figure()
+        fig.update_layout(**chart_layout(height=240))
+        return fig
+
+    attrs = getattr(portfolio, "attrs", {}) or {}
+    rc_target = attrs.get("nco_rc_target", "none")
+
+    df = portfolio.copy()
+    if "risk_contribution" not in df.columns:
+        df["risk_contribution"] = np.nan
+    df = df.sort_values("weightage_pct", ascending=False).head(40)
+    n = len(df)
+    eq = 100.0 / n if n else 0.0
+    w = pd.to_numeric(df["weightage_pct"], errors="coerce").fillna(0.0)
+    rc = pd.to_numeric(df["risk_contribution"], errors="coerce").fillna(0.0) * 100.0
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["symbol"], y=w, name="Capital",
+        marker=dict(color=COLORS["slate_dim"]),
+        hovertemplate="<b>%{x}</b><br>Capital %{y:.2f}%<extra></extra>",
+    ))
+    # Risk bars carry the verdict colour: at target is calm, over is hot. For
+    # methods that do not target equal risk, "over its equal share" is still the
+    # meaningful warning, so the same rule reads correctly for all of them.
+    over = rc > eq * 1.15
+    fig.add_trace(go.Bar(
+        x=df["symbol"], y=rc, name="Risk (variance share)",
+        marker=dict(color=[COLORS["rose"] if o else COLORS["emerald"] for o in over]),
+        hovertemplate="<b>%{x}</b><br>Risk share %{y:.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=eq, line=dict(color=COLORS["amber"], width=1.2, dash="dash"),
+                  annotation_text=f"equal share {eq:.2f}%",
+                  annotation_position="top right",
+                  annotation_font=dict(size=9, color=COLORS["amber"]))
+
+    disp = attrs.get("nco_rc_dispersion")
+    solved = attrs.get("nco_rc_dispersion_solved")
+    if rc_target == "equal" and disp is not None:
+        # Two numbers, not one. The solver's own dispersion says whether it
+        # converged; the realised dispersion says what the held book looks like
+        # after top-N selection and the position cap have pulled it away from
+        # the solution. Showing only the realised figure makes a correct solve
+        # read as a failure whenever the cap binds.
+        ok = (solved if solved is not None else disp) < 0.01
+        txt = f"risk dispersion — solved {solved:.3f}" if solved is not None else ""
+        txt = (txt + f" · realised {disp:.3f} after selection + cap") if txt else \
+              f"risk dispersion {disp:.3f}"
+        fig.add_annotation(
+            xref="paper", yref="paper", x=0, y=1.10, showarrow=False,
+            text=txt + ("  ✓ solver balanced" if ok else "  — solver did not converge"),
+            font=dict(size=10, color=COLORS["emerald"] if ok else COLORS["rose"]),
+            align="left",
+        )
+
+    fig.update_layout(**chart_layout(height=max(260, 26 * 10 + 120), show_legend=True))
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08)
+    style_axes(fig)
+    fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
+    fig.update_yaxes(title_text="% of book", tickfont=dict(size=9))
     return fig
 
 

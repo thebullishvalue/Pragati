@@ -93,16 +93,49 @@ streamlit run app.py
 
 **Styles**
 
-| Style | Behaviour |
-|---|---|
-| **Risk Parity (HRP)** | Clusters holdings by correlation distance, then splits capital by recursive bisection on cluster variance. Inverts no matrix. |
-| **Equal Weight** | Identical `1/N` per holding. Travels the same pipeline, so the clustering diagnostics still render — you see the risk it leaves unbalanced. |
+| Style | Family | Behaviour |
+|---|---|---|
+| **Equal Weight** *(default)* | baseline | Identical `1/N` per holding. The default because nothing beat it — see below. Lowest turnover of any style. |
+| **Equal Risk Contribution** | preservation | Solves so every holding contributes the same share of portfolio variance. The preferred risk-reduction style: beats HRP on the any-date hit rate in 6 of 6 cells across two stock universes while trading ~5× less. |
+| **Risk Parity (HRP)** | preservation | Clusters by correlation distance, then splits capital by recursive bisection on cluster variance. Inverts no matrix. Same job as ERC at five times the turnover; kept for continuity. |
+| **Max Diversification** | preservation | Maximises the diversification ratio. Lowest beta of the set and the strongest lump-sum result measured — but it lost every SIP stream tested. |
+
+Every style travels the identical pipeline — same eligibility filter, same
+clustering diagnostics, same risk decomposition — so any difference on screen is
+the allocator and nothing else.
+
+### Why Equal Weight is the default
+
+A 36-candidate allocator search across three universes (this ETF book, Nifty 50
+and Dow Jones 30; 14 years and 176 rebalances on the stock universes) found **no
+method with a reproducible return improvement over `1/N`**:
+
+```
+                    ETF book    NIFTY 50    DOW 30     turnover/yr
+  Equal Weight        —           —           —          0.12x
+  ERC               +0.26%      -0.51%      -1.48%       0.26x
+  Risk Parity       -1.33%      -1.08%      -2.94%       1.31x
+  Max Diversif.     +0.35%      +0.86%      -0.51%       1.19x
+```
+
+What *does* reproduce is the ordering **among the risk-reduction styles**: ERC
+beats HRP on the any-date hit rate in every cell tested, on both stock
+universes, at a fifth of the turnover. That is a real improvement to the risk
+leg — which the rest of this README has always said is the leg that reproduces.
+
+> **Correction (v11.1).** An earlier build of this analysis reported ERC and an
+> ERC+momentum tilt beating Equal Weight in 98–100% of five-year SIP streams.
+> That was an artifact of a defect in the ERC solver, which renormalised inside
+> its descent loop and so converged to something between inverse-volatility and
+> equal-risk. Against a corrected solver the result inverted to **0 of 115**.
+> The momentum style was withdrawn before release; the fixed solver ships. See
+> `research/README.md`.
 
 **Result tabs**
 
 | Tab | Contents |
 |---|---|
-| **Portfolio** | Holdings with weight, risk share, volatility, independence · risk-profile heatmap · cluster correlation matrix |
+| **Portfolio** | Holdings with weight, risk share, volatility, independence · risk-profile heatmap · **risk-contribution chart** · cluster correlation matrix |
 | **Analytics** | Three-way head-to-head table (book / equal weight / benchmark) plus benchmark-relationship statistics, over an indexed performance chart |
 | **Regime** | 8-factor composite + history. Context only — nothing is conditioned on it |
 | **Broker Sync** | Writes curated units into broker order-template JSONs |
@@ -123,10 +156,20 @@ one carrying more.
 against its equal share. 1.0× is perfect balance; above ~3× means one holding
 dominates the book's variance.
 
+**Risk Contribution** puts capital share and variance share on one absolute
+scale, against a dashed line at the equal share. What it *should* look like
+depends on the style, and the chart says so: ERC solves for flat risk bars on
+that line and reports its solver dispersion (target 0.000) separately from the
+realised figure, because top-N selection and the position cap move the held book
+away from the solution. HRP's bars are uneven **by design** — it balances across
+clusters, not holdings. For Equal Weight the gap between the two series *is* the
+argument for risk-based weighting.
+
 **Risk Structure** is the correlation matrix reordered by cluster. Crisp blocks
 along the diagonal mean the clustering found real structure. A uniformly warm
 matrix means the universe is effectively a single bet — which no allocator can
-fix.
+fix. Only HRP allocates *from* this tree; for the other styles the matrix is
+shown as a diagnostic and labelled as such.
 
 ## Reading the Analytics tab
 
