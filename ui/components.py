@@ -1,6 +1,6 @@
 """
 PRAGYAM — Reusable UI components: panels, metric cards, tables, chrome.
-प्रज्ञा (Pragyam) — "Discernment / Wisdom"
+प्रज्ञम् (Pragyam) — "Discernment / Wisdom"
 
 UI — "Graphite" institutional terminal design language (see ui/theme.py).
 
@@ -111,7 +111,8 @@ def render_section_header(
     """Render a styled section header with icon, title, and optional description.
 
     Args:
-        title: Section title (rendered uppercase).
+        title: Section title. Names the section's SUBJECT, never its page —
+            the nav already says which page you are on.
         description: Optional one-line description below title.
         icon: Key from ICONS dict.
         accent: CSS color class — "", "cyan", "emerald", "violet", "rose".
@@ -436,7 +437,7 @@ def render_metric_card(
     )
 
 
-def render_kpi_strip(items: list[dict], *, max_cols: int = 5, key: str = "kpi-strip") -> None:
+def render_kpi_strip(items: list[dict], *, max_cols: int = 5, key: str = "strip") -> None:
     """Lay out ``render_metric_card`` items in rows of at most ``max_cols``.
 
     Each item is the keyword set ``render_metric_card`` takes: ``label``,
@@ -447,7 +448,13 @@ def render_kpi_strip(items: list[dict], *, max_cols: int = 5, key: str = "kpi-st
     """
     if not items:
         return
-    with st.container(key=key):
+    # `kpi-` prefix so the stylesheet can address every strip by one selector,
+    # the way it addresses every panel by `st-key-panel-`. Without it each
+    # strip carried an unrelated key (book-kpi, landing-coverage, benchmark-rel)
+    # and nothing could give the family a shared rule — which is why a note
+    # under a strip sat tight against the cards while a note under a panel had
+    # the panel's own bottom margin to breathe against.
+    with st.container(key=f"kpi-{key}"):
         for i in range(0, len(items), max_cols):
             row = items[i:i + max_cols]
             cols = st.columns(len(row), gap="small")
@@ -485,7 +492,7 @@ def render_header(title: str, tagline: str) -> None:
 
 
 def render_nav_brand(title: str = "PRAGYAM",
-                     tagline: str = "प्रज्ञा · Curation") -> None:
+                     tagline: str = "प्रज्ञम् · Curation") -> None:
     """Render the control rail's brand block.
 
     The mark is split so the second half carries the accent — a product mark
@@ -575,7 +582,7 @@ def render_top_bar(
         f'<div class="command-bar{open_cls}">'
         f'<div class="cb-left">'
         f'<div class="cb-brand"><span class="mark">PRA<span class="accent-ink">GYAM</span></span>'
-        f'<span class="sub">प्रज्ञा</span></div>'
+        f'<span class="sub">प्रज्ञम्</span></div>'
         f'{instrument_html}{quote_html}'
         f'</div>'
         f'<div class="cb-right">{meta_html}{chip_html}</div>'
@@ -841,7 +848,7 @@ def render_data_table(
     label_col: str | None = None,
     col_labels: dict[str, str] | None = None,
     max_height: int = 520,
-    row_height: int = 27,
+    row_height: int = 31,
 ) -> None:
     """Render a DataFrame as the app's one institutional table.
 
@@ -970,9 +977,17 @@ def render_data_table(
             tds.append(f'<td class="{cls}">{_value_html(c, row[c])}</td>')
         body_rows.append(f"<tr>{''.join(tds)}</tr>")
 
+    # HEIGHT MUST MATCH WHAT THE CSS ABOVE ACTUALLY RENDERS, because the
+    # iframe does not grow to its content: anything the estimate misses is
+    # simply cut off. A row is 0.6875rem text at line-height 1.5 (16.5px) plus
+    # 0.4rem padding top and bottom (12.8px) plus a 1px rule = 30.3px, and the
+    # estimate said 27 — three pixels a row, which is invisible on a 20-row
+    # table and takes the bottom off a two-row one. The header is 0.625rem at
+    # 1.2 plus 0.5rem padding plus its rule = 29px.
     n_rows = len(view)
-    _HEADER_H = 30                      # sticky header row, matches the CSS above
-    content_h = _HEADER_H + n_rows * row_height + 4
+    _HEADER_H = 29
+    _SCROLL_PAD = 2                     # .tt-scroll's own padding-top
+    content_h = _HEADER_H + n_rows * row_height + _SCROLL_PAD + 2
     iframe_h = min(content_h, max_height)
 
     # The iframe cannot see the app's stylesheet, so the design tokens it needs
@@ -1080,40 +1095,6 @@ def render_kv_table(data: dict, header_left: str = "Setting",
                   f'<div class="value">{html_mod.escape(str(v))}</div>')
     st.markdown(
         f'<div class="kv-table-container"><div class="kv-table">{cells}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_regime_badge(
-    *,
-    name: str,
-    description: str,
-    score: float,
-    confidence: float,
-    colour: str,
-    icon: str = "compass",
-) -> None:
-    """The market regime, as context and never as an instruction.
-
-    Nothing downstream is conditioned on the regime, so it is drawn as a
-    readout with one tinted edge rather than as a signal card that would
-    compete with the book for the reader's first glance. The colour is the
-    caller's (one hue per regime) and is the only inline value here.
-    """
-    st.markdown(
-        f'<div class="regime-badge" style="border-left-color:{html_mod.escape(colour)};">'
-        f'<span class="regime-icon" style="color:{html_mod.escape(colour)};">'
-        f'{get_icon(icon, 22)}</span>'
-        f'<span style="flex:1 1 auto;min-width:0;">'
-        f'<span class="regime-name" style="display:block;">'
-        f'{html_mod.escape(name.replace("_", " "))}</span>'
-        f'<span class="regime-sub">{html_mod.escape(description)}</span>'
-        f'</span>'
-        f'<span style="text-align:right;flex:0 0 auto;">'
-        f'<span class="regime-score" style="display:block;">score {score:+.2f}</span>'
-        f'<span class="regime-conf">{confidence:.0%} confidence</span>'
-        f'</span>'
-        f'</div>',
         unsafe_allow_html=True,
     )
 

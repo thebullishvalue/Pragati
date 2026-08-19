@@ -1,6 +1,6 @@
 """
 PRAGYAM — Shared CSS, chart theming, and colour constants for the UI layer.
-प्रज्ञा (Pragyam) — "Discernment / Wisdom"
+प्रज्ञम् (Pragyam) — "Discernment / Wisdom"
 
 UI — Institutional research terminal design language.
 
@@ -698,7 +698,7 @@ def inject_css(theme: str = "dark") -> None:
     Injects on every render — Streamlit deduplicates identical <style> blocks.
     """
     if CSS_PATH.exists():
-        # Explicit UTF-8: theme.css embeds a Devanagari string (प्रज्ञा) in a
+        # Explicit UTF-8: theme.css embeds a Devanagari string (प्रज्ञम्) in a
         # content: "..." rule. Path.read_text() with no encoding= falls back to
         # the OS locale encoding, which on many Windows machines is cp1252 (not
         # UTF-8) — that raises UnicodeDecodeError on the non-ASCII bytes and

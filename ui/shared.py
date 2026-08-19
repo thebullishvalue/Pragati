@@ -1,6 +1,6 @@
 """
 PRAGYAM — Presentation helpers shared by the app shell and every tab.
-प्रज्ञा (Pragyam) — "Discernment / Wisdom"
+प्रज्ञम् (Pragyam) — "Discernment / Wisdom"
 
 The pieces of the UI layer that need to know something about the DOMAIN — how
 a style is named, what an undefined figure looks like, which order the regime

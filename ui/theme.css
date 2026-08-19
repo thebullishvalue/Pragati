@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    PRAGYAM — INSTITUTIONAL DESIGN SYSTEM
-   प्रज्ञा — "Discernment / Wisdom"
+   प्रज्ञम् — "Discernment / Wisdom"
 
    A terminal for reading a curated book, not a dashboard for admiring it. The
    rules below are the ones a portfolio desk actually needs, and each is a
@@ -674,8 +674,35 @@
 [class*="st-key-panel-"] [data-testid="stMarkdown"]:has(.panel-copy) > div {
     height: auto !important;
     min-height: fit-content !important;
-    flex: 0 0 auto !important;
+    /* GROW, not merely refuse to collapse. `0 0 auto` sized this box to its
+       content, which is what the clipping fix above needed and all it needed.
+       But a box that stops at its content cannot hand its panel a bottom edge
+       to align a ledger against — see the silhouette rule below. The
+       `min-height: fit-content` floor still carries the original fix. */
+    flex: 1 1 auto !important;
 }
+
+/* ── Three cards, one silhouette ──────────────────────────────────────────
+   A row of peer panels must present ONE bottom edge. `align-items: stretch`
+   on the column row is already set, but that stretches the COLUMN — the panel
+   inside it still sized itself to its own prose, so the three Systems cards
+   ended at three different heights and their spec ledgers began at three
+   different lines. Three boxes describing three parts of one pipeline, drawn
+   as though they were unrelated.
+
+   The wrapper chain between a column and a panel is a Streamlit implementation
+   detail whose depth has moved between versions, so `:has()` matches it at
+   whatever depth it currently is rather than naming a fixed number of
+   ancestors. Then the ledger takes `margin-top: auto` and settles on the
+   bottom edge, which is what puts the three ledgers on the same lines. */
+[data-testid="stColumn"] div:has([class*="st-key-panel-landing-"]) {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+[data-testid="stColumn"] [class*="st-key-panel-landing-"] { flex: 1 1 auto; }
+[class*="st-key-panel-landing-"] .panel-specs { margin-top: auto; }
 
 /* ── The section rhythm contract ──────────────────────────────────────────
    Vertical rhythm has exactly ONE definition, and it lives here, because the
@@ -927,7 +954,7 @@
     border: 1px solid var(--line-strong);
     border-radius: var(--r-lg);
     padding: var(--s4);
-    margin: var(--s3) 0;
+    margin: 0 0 var(--s3);      /* below only — see the note on .empty-state */
 }
 .interp-title {
     font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 700;
@@ -1004,12 +1031,18 @@
    "no data yet", "no usable precedent", "no weights yet" everywhere in the
    app so degraded states read as one system rather than six ad hoc notices.
    ───────────────────────────────────────────────────────────────────────── */
+/* Margin BELOW only. A symmetric `margin: var(--s3) 0` pushed the box down
+   from whatever preceded it — including nothing at all, which is what put the
+   empty state 12px lower than the uploader in the column beside it while both
+   were the first thing in their column. Separation between stacked blocks is
+   the container's flex gap plus this bottom margin; a top margin only ever
+   breaks the alignment of a first child. */
 .empty-state {
     background: var(--surface-1);
     border: 1px solid var(--line);
     border-radius: var(--r-lg);
     padding: var(--s6) var(--s5);
-    margin: var(--s3) 0;
+    margin: 0 0 var(--s3);
 }
 .empty-state .es-eyebrow {
     font-family: var(--mono); font-size: var(--fs-3xs); font-weight: 600;
@@ -1264,9 +1297,19 @@
 }
 .note strong { color: var(--ink-secondary); font-weight: 650; }
 .note em { font-style: italic; }
-[class*="st-key-panel-"] + [data-testid="stElementContainer"] .note {
-    margin-top: calc(-1 * var(--s2));
+/* One rule, whatever the note follows. Keying this on `st-key-panel- +
+   container` only closed the gap under a PANEL — so a note under a KPI strip
+   (a `st-key-*` container of a different name) kept the block's full flex gap
+   above it while a note under a table had it removed, and the two tiers of
+   the same component sat at two different distances from the thing they
+   explain. `:has()` asks the only question that matters — is there a note in
+   this container — and answers it identically everywhere. */
+[data-testid="stElementContainer"]:has(.note) {
+    margin-top: calc(-1 * var(--s2)) !important;
 }
+/* And the strip gets the panel's own bottom margin, so "the block above a
+   note" has one geometry regardless of which block it is. */
+[class*="st-key-kpi-"] { margin-bottom: var(--s4); }
 
 /* Rail buttons sit two-to-a-row, so a label must never wrap: "Refresh" at
    the app's uppercase + 0.1em tracking was breaking to "REFRES / H", which
@@ -1625,6 +1668,17 @@
    read down the value column ("what was this book built under?") rather than
    scanned for one line. The header row is the table header treatment from
    §13, restated at grid scale so the two never disagree. */
+/* THE BLOCK-ABOVE-A-NOTE CONTRACT.
+   A note is pulled up 8px against whatever precedes it, so whatever precedes
+   it must offer the same 16px to be pulled from. Panels always had it and KPI
+   strips were given it; this readout had none, which is why the note under
+   the settings table sat tight against the last row while the identical
+   component under a chart did not. Any new block a note can follow belongs in
+   this list. */
+.kv-table-container,
+.intel-method-card {
+    margin-bottom: var(--s4);
+}
 .kv-table-container {
     background: var(--surface-1);
     border: 1px solid var(--line);
@@ -1703,10 +1757,14 @@
     padding: 0 var(--s4) var(--s4);
     align-items: stretch;
 }
+/* One border weight all the way round, like every other card in the app.
+   These four carried a 2px coloured left edge naming the pipeline stage —
+   which is decoration standing in for a claim: the stage is already the tile's
+   own label, in words, one line above. Same argument that took the edge off
+   the notices and the interpretation cards. */
 .intel-method-tile {
     background: var(--surface-2);
     border: 1px solid var(--line);
-    border-left: 2px solid var(--neutral);
     border-radius: var(--r-md);
     padding: var(--s3);
     display: flex; flex-direction: column; gap: var(--s2);
@@ -1720,70 +1778,37 @@
     font-family: var(--sans); font-size: var(--fs-sm); line-height: 1.6;
     color: var(--ink-secondary);
 }
-.tile-body code {
-    font-family: var(--mono); font-size: var(--fs-xs);
-    background: var(--surface-3); border: 1px solid var(--line-faint);
-    border-radius: var(--r-sm); padding: 1px 4px; color: var(--ink);
-}
-/* The rule down each tile's left edge is the only colour on this surface, and
-   it names the STAGE, not a sentiment: what the method learns from, how it
-   allocates, what it targets, and what it refuses to claim. */
-.tile-learns  { border-left-color: var(--system); }
-.tile-how     { border-left-color: var(--accent); }
-.tile-obj     { border-left-color: var(--long); }
-.tile-safety  { border-left-color: var(--caution); }
-
-/* ── Regime banner ───────────────────────────────────────────────────────
-   Context, never an instruction: nothing downstream is conditioned on the
-   regime, so it is drawn as a readout with a tinted edge rather than as a
-   signal card competing with the book. The tint colour is passed inline by
-   the caller (one hue per regime); everything else is a token. */
-.regime-badge {
-    display: flex; align-items: center; gap: var(--s3);
-    background: var(--surface-1);
-    border: 1px solid var(--line);
-    border-left-width: 3px;
-    border-radius: var(--r-lg);
-    padding: var(--s3) var(--s4);
-}
-.regime-icon { display: flex; align-items: center; flex: 0 0 auto; }
-.regime-icon svg { width: 22px; height: 22px; }
-.regime-name {
-    font-family: var(--sans); font-size: var(--fs-lg); font-weight: 650;
-    color: var(--ink); letter-spacing: -0.01em; line-height: 1.2;
-}
-.regime-sub {
-    font-family: var(--sans); font-size: var(--fs-xs);
-    color: var(--ink-tertiary); line-height: 1.4;
-}
-.regime-score,
-.regime-conf {
-    font-family: var(--mono); font-size: var(--fs-xs);
-    color: var(--ink-secondary); font-variant-numeric: tabular-nums;
+/* INLINE CODE, EVERYWHERE IT APPEARS.
+   This rule was scoped to `.tile-body code`, which is one of the ten places
+   the app writes a `<code>` — so the tiles looked right and every other one
+   fell through to Streamlit's own code styling, painted from its static dark
+   base. On Paper that is a black chip with green text in the middle of a
+   white paragraph: `[-2, +2]` in the regime lede, the field names in the
+   sync copy, the formulae in the method card.
+   One rule, all surfaces, our tokens. Same failure and same fix as the date
+   picker and the file uploader — a widget nobody claimed keeps the base's. */
+.tile-body code,
+.intel-method-lede code,
+.note code, .panel-copy code, .interp-body code, .empty-state code,
+.notice .n-body code, .section-hdr .desc code,
+.stMarkdown code, [data-testid="stMarkdownContainer"] code {
+    font-family: var(--mono) !important;
+    font-size: var(--fs-xs) !important;
+    background: var(--surface-3) !important;
+    border: 1px solid var(--line-faint);
+    border-radius: var(--r-sm);
+    padding: 1px 4px;
+    color: var(--ink) !important;
     white-space: nowrap;
 }
 
-/* ── Confidence track ────────────────────────────────────────────────────
-   A bar is the one element allowed --motion-slow, because it changes SIZE and
-   the eye needs help following that. Pill-radius here is deliberate and is
-   the only pill in the system besides a status dot. */
-.conf-bar-bg {
-    height: 4px; border-radius: var(--r-pill);
-    background: var(--surface-3);
-    overflow: hidden;
-}
-.conf-bar-fill {
-    height: 100%; border-radius: var(--r-pill);
-    background: var(--accent);
-    transition: width var(--motion-slow) var(--ease-standard);
-}
 
 /* ── Semantic emphasis inside prose ──────────────────────────────────────
    A note or lede occasionally names one of the three books by the colour it
    is drawn in on the chart above, and a number occasionally carries its own
-   sign's meaning. These four are the only way prose is allowed to be
-   coloured: they read the same tokens the marks do, so the sentence and the
-   line it describes can never disagree about which green they mean. */
+   sign's meaning. These are the only way prose is allowed to be coloured:
+   they read the same tokens the marks do, so the sentence and the line it
+   describes can never disagree about which green they mean. */
 .ink-accent  { color: var(--accent); font-weight: 600; }
 .ink-long    { color: var(--long);   font-weight: 600; }
 .ink-short   { color: var(--short);  font-weight: 600; }
@@ -1799,8 +1824,9 @@
 
    Width is the only inline value on these rows — it is the datum. Everything
    else, including which side the fill grows from, is a class. */
-.factor-block { margin-top: var(--s4); }
+.factor-block { padding: var(--s4); }
 .factor-row { margin: 0 0 var(--s3) 0; }
+.factor-row:last-child { margin-bottom: 0; }
 .factor-head {
     display: flex; align-items: baseline; justify-content: space-between;
     gap: var(--s3); margin-bottom: var(--s1);
@@ -1815,7 +1841,7 @@
 }
 .factor-score {
     font-family: var(--mono); font-weight: 600;
-    font-variant-numeric: tabular-nums; margin-left: var(--s1);
+    font-variant-numeric: tabular-nums; margin-left: var(--s2);
 }
 .factor-score.pos { color: var(--long); }
 .factor-score.neg { color: var(--short); }
@@ -1846,11 +1872,7 @@
     display: flex; justify-content: space-between;
     font-family: var(--mono); font-size: var(--fs-3xs);
     letter-spacing: 0.08em; text-transform: uppercase;
-    color: var(--ink-quaternary); margin: 0 0 var(--s2) 0;
-}
-.factor-lede {
-    font-family: var(--sans); font-size: var(--fs-sm);
-    color: var(--ink-tertiary); margin: 0 0 var(--s3) 0;
+    color: var(--ink-quaternary); margin: 0 0 var(--s3) 0;
 }
 
 /* ── Framed table wrapper ────────────────────────────────────────────────
@@ -1999,6 +2021,19 @@
 .stTextInput input {
     min-height: 34px !important;
     display: flex; align-items: center;
+}
+/* And the ground under all four, named HERE rather than left to Streamlit.
+   The select and the text input were already claimed above; the date and
+   number containers were not, so on Slate their fill came from Streamlit's
+   own theme object. That object is built at page load from
+   `.streamlit/config.toml` and — with both a light and a dark section
+   declared there — RESOLVES AGAINST THE VIEWER'S OS PREFERENCE, not against
+   this app's Slate/Paper toggle. A viewer on a light OS therefore got two
+   pale fields in an otherwise graphite rail, and nothing in the app could
+   see it happen. A control's fill is the stylesheet's to state. */
+.stDateInput [data-baseweb="input"],
+[data-testid="stNumberInputContainer"] {
+    background: var(--bg) !important;
 }
 /* Inner inputs: no box of their own, one shared inset, full height so the
    click target is the whole field rather than the text within it. */
@@ -2762,6 +2797,24 @@
 [data-testid="stMain"] [data-testid="stColumn"] {
     min-width: 0;          /* a grid item's floor is the track, not its content */
     width: auto !important;
+}
+
+/* ── Weighted two-column rows ────────────────────────────────────────────
+   The rule above makes every column row equal tracks, which is right for the
+   KPI strips and card grids that make up almost all of this app — and wrong
+   for a row whose two halves are not peers. `st.columns([5, 7])` cannot
+   express that any more, because a grid ignores the flex-basis Streamlit
+   computes from those weights.
+   So a weighted row declares itself: wrap it in a container keyed `split-*`
+   and it gets 5/12 + 7/12 instead. One documented exception, addressable by
+   one selector, rather than every column row guessing. */
+[class*="st-key-split-"] [data-testid="stHorizontalBlock"] {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+}
+@media (max-width: 900px) {
+    [class*="st-key-split-"] [data-testid="stHorizontalBlock"] {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 /* ── Breakpoints ──────────────────────────────────────────────────────────
