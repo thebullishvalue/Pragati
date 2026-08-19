@@ -6,43 +6,47 @@
 # own theme system directly rather than plain CSS (radio/checkbox dots,
 # toggle switches, links, code blocks) — without it those fall back to
 # Streamlit's stock red (#FF4B4B), which clashes with the accent-blue /
-# semantic-color system everywhere else.
+# semantic-colour system everywhere else. Before this file existed, that red
+# was the only unclaimed colour left in the application.
 #
-# BASE IS NOW LIGHT, because Paper is the default appearance (see APPEARANCES
-# in app.py — first-in-tuple is the first-run default). Previously this file
-# was pinned dark while Slate led, so the native controls agreed with the
-# default and disagreed only in the non-default mode. Flipping the default
-# without flipping this would have inverted that: light text (#E6EAF1) on
-# Paper's near-white ground on FIRST LOAD, which is the worst case to ship.
+# ── WHY THERE IS EXACTLY ONE SECTION ─────────────────────────────────────
+# This file used to declare [theme.light] and [theme.dark] as well, on the
+# reasoning that mirroring both of ui/theme.css's ramps meant whichever one
+# Streamlit resolved would still be one of ours. That reasoning was wrong,
+# and the way it was wrong is worth stating so it is not re-introduced.
 #
-# Both variants are declared. [theme.light] and [theme.dark] mirror the two
-# token ramps in ui/theme.css exactly, so whichever one Streamlit resolves for
-# its native widgets is one of OUR two appearances rather than stock Streamlit
-# — a mismatch then means "wrong one of ours", never "unstyled".
+# Read from the shipped 1.51 bundle (`createCustomThemes`): if EITHER a light
+# or a dark section is present, Streamlit builds three themes — Light, Dark,
+# and a third named "Custom Theme Auto" defined as
 #
-# THE RESIDUAL LIMITATION, stated because it cannot be fixed here: this file is
-# STATIC. It cannot follow the in-app Paper/Slate toggle, which lives in
-# session state and swaps CSS tokens at render time. Anything Streamlit themes
-# natively therefore tracks Streamlit's own resolution, not the app's toggle.
-# The durable fix is to override those controls in theme.css so this file stops
-# mattering — the menu-row rules there are the pattern (paint nothing; let the
-# themed surface show through).
+#     getSystemThemePreference() === "dark" ? dark : light
+#
+# and makes that third one active. `base` does not pin anything; it only
+# supplies fallbacks for keys a section leaves unset. So declaring both
+# sections handed the native-widget theme to THE VIEWER'S OPERATING SYSTEM,
+# while this app's own appearance comes from its Slate/Paper toggle in
+# session state. The two agree only by coincidence — on a developer machine
+# whose OS happens to match the app's default, which is exactly the machine
+# where the mismatch cannot be seen. A viewer on a light OS got pale native
+# controls in the graphite rail; a viewer on a dark OS who switched the app
+# to Paper got black selects on white. Streamlit even registers a
+# `matchMedia("(prefers-color-scheme: dark)")` listener, so it could flip
+# mid-session. Hosting multiplies this: every viewer brings their own OS.
+#
+# With ONE section the same code takes the other branch — a single "Custom
+# Theme", set active for every viewer regardless of OS — and `addThemes(...,
+# {keepPresetThemes: false})` drops Streamlit's own Light/Dark/Auto entries
+# from the appearance menu, so a viewer cannot select a mismatching native
+# theme either. The native layer is now a known, fixed state.
+#
+# That fixed state is DARK, to agree with APPEARANCES[0] in app.py (Slate is
+# the first-run default). Paper is reached only through the app's toggle, and
+# every native control it touches is claimed in CSS by the reclaim block in
+# ui.theme.LIGHT_TOKENS. If you add a widget that paints itself from
+# Streamlit's theme rather than from a class, claim it there — do not add a
+# section back here.
 [theme]
-base = "light"
-primaryColor = "#2B5FD9"
-backgroundColor = "#F4F6F8"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#141920"
-
-# Paper — mirrors the LIGHT_TOKENS ramp in ui/theme.py.
-[theme.light]
-primaryColor = "#2B5FD9"
-backgroundColor = "#F4F6F8"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#141920"
-
-# Slate — mirrors the canonical dark :root ramp in ui/theme.css.
-[theme.dark]
+base = "dark"
 primaryColor = "#4C7DF0"
 backgroundColor = "#0A0C10"
 secondaryBackgroundColor = "#0F1217"
