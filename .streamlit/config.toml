@@ -6,13 +6,14 @@
 # own theme system directly rather than plain CSS (radio/checkbox dots,
 # toggle switches, links, code blocks) — without it those fall back to
 # Streamlit's stock red (#FF4B4B), which clashes with the accent-blue /
-# semantic-colour system everywhere else. Before this file existed, that red
-# was the only unclaimed colour left in the application.
+# semantic-color system everywhere else.
 #
-# BASE IS DARK, because Slate is the default appearance (see APPEARANCES in
-# app.py — first-in-tuple is the first-run default). The two must agree: a base
-# that disagrees with the default ships light text on a light ground, or the
-# reverse, on FIRST LOAD, which is the worst case to get wrong.
+# BASE IS NOW LIGHT, because Paper is the default appearance (see APPEARANCES
+# in app.py — first-in-tuple is the first-run default). Previously this file
+# was pinned dark while Slate led, so the native controls agreed with the
+# default and disagreed only in the non-default mode. Flipping the default
+# without flipping this would have inverted that: light text (#E6EAF1) on
+# Paper's near-white ground on FIRST LOAD, which is the worst case to ship.
 #
 # Both variants are declared. [theme.light] and [theme.dark] mirror the two
 # token ramps in ui/theme.css exactly, so whichever one Streamlit resolves for
@@ -20,24 +21,18 @@
 # — a mismatch then means "wrong one of ours", never "unstyled".
 #
 # THE RESIDUAL LIMITATION, stated because it cannot be fixed here: this file is
-# STATIC. It cannot follow the in-app Slate/Paper toggle, which lives in
+# STATIC. It cannot follow the in-app Paper/Slate toggle, which lives in
 # session state and swaps CSS tokens at render time. Anything Streamlit themes
 # natively therefore tracks Streamlit's own resolution, not the app's toggle.
 # The durable fix is to override those controls in theme.css so this file stops
-# mattering — the reclaiming rules in LIGHT_TOKENS are the pattern.
+# mattering — the menu-row rules there are the pattern (paint nothing; let the
+# themed surface show through).
 [theme]
-base = "dark"
-primaryColor = "#4C7DF0"
-backgroundColor = "#0A0C10"
-secondaryBackgroundColor = "#0F1217"
-textColor = "#E6EAF1"
-
-# Slate — mirrors the canonical dark :root ramp in ui/theme.css.
-[theme.dark]
-primaryColor = "#4C7DF0"
-backgroundColor = "#0A0C10"
-secondaryBackgroundColor = "#0F1217"
-textColor = "#E6EAF1"
+base = "light"
+primaryColor = "#2B5FD9"
+backgroundColor = "#F4F6F8"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#141920"
 
 # Paper — mirrors the LIGHT_TOKENS ramp in ui/theme.py.
 [theme.light]
@@ -45,3 +40,10 @@ primaryColor = "#2B5FD9"
 backgroundColor = "#F4F6F8"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#141920"
+
+# Slate — mirrors the canonical dark :root ramp in ui/theme.css.
+[theme.dark]
+primaryColor = "#4C7DF0"
+backgroundColor = "#0A0C10"
+secondaryBackgroundColor = "#0F1217"
+textColor = "#E6EAF1"
