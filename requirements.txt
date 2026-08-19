@@ -2,8 +2,52 @@
 # @thebullishvalue · Covariance-Based Portfolio Curation
 # Python 3.10+ required
 
-# Core Framework
-streamlit>=1.28.0
+# ── Core Framework ───────────────────────────────────────────────────────
+# PINNED EXACTLY, and it has to be: this package is a UI contract, not a
+# dependency with a floor.
+#
+# What the old `streamlit>=1.28.0` did. On Streamlit Cloud a floor resolves to
+# whatever is newest — 1.61.1 at the time of writing, ten minor versions past
+# the frontend this design system was measured against. Streamlit is migrating
+# its widgets off BaseWeb onto React Aria, component by component, and by
+# 1.61 `st.selectbox` has made that move: it renders React Aria markup
+# (`selectedKey`, `onSelectionChange`, Floating UI) and no longer emits
+# `data-baseweb="select"` at all. Measured across the two shipped bundles, the
+# count of `data-baseweb` emissions falls from 30 to 11 and the tooltip
+# attribute disappears outright.
+#
+# ui/theme.css keys the entire field, menu and tooltip layer on those
+# attributes. On 1.61 they match nothing, so the rail's controls arrive with
+# no height, no radius, no type and no ground of ours — painted instead from
+# Streamlit's own theme object, which is how a black select ends up sitting in
+# a white sidebar. Nothing was wrong with the CSS. It had been measured
+# against a frontend that was not the one being served.
+#
+# WHY 1.52.2 and not 1.51.0, the version developed against: 1.51 requires
+# `pyarrow<22`, and pyarrow publishes cp314 wheels only from 22.0.0, while
+# Streamlit Cloud runs Python 3.14. 1.51 therefore cannot install there at
+# all. 1.52.2 relaxes that to `pyarrow>=7.0` and — verified by diffing the two
+# bundles — carries a DOM identical to 1.51.0 on every hook this app uses
+# (`data-baseweb`, stSelectbox, stDateInput, stNumberInputContainer,
+# stElementContainer, stMarkdownContainer, stVerticalBlock, stHorizontalBlock,
+# stColumn, stSidebarNavLink, st-key-*). It is the deployable floor and the
+# ceiling at once.
+#
+# Staying under 1.53 also keeps the Tornado server: 1.53 began the move to
+# Starlette/uvicorn, and Streamlit did not cap its Starlette dependency until
+# 1.61.1, so releases in between resolve whatever Starlette is newest.
+# Starlette 1.4.0 made `thread_minimum_size` a required keyword-only argument
+# of `GZipResponder.__init__`, which Streamlit's subclass does not pass — every
+# request, health checks included, then 500s.
+#
+# DEVELOP ON THIS EXACT VERSION TOO. `pip install -r requirements.txt` gives it
+# to you. A local interpreter on a different Streamlit is precisely how this
+# reached a deploy.
+streamlit==1.52.2
+# Belt and braces, inert under the pin above: on Tornado, Streamlit never
+# imports Starlette, so this costs ~1MB of unused package. It earns its place
+# the day someone raises that pin.
+starlette>=0.46.0,<1.0.0
 
 # Data Processing
 pandas>=2.0.0
