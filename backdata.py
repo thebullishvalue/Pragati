@@ -27,8 +27,9 @@ import warnings
 import os
 from typing import List, Tuple, Dict, Any, Optional, cast
 
-# Import circuit breaker and metrics
+# Import circuit breaker, metrics and the console
 from circuit_breaker import yfinance_circuit, RetryWithBackoff
+from logger_config import console
 from metrics import get_metrics
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -516,13 +517,6 @@ def _recover_missing_symbols(
         report["skipped_reason"] = "budget"
         missing = missing[:_RECOVERY_MAX_SYMBOLS]
 
-    console = None
-    try:
-        from logger_config import console as _c
-        console = _c
-    except Exception:
-        pass
-
     recovered: Dict[str, pd.DataFrame] = {}
     consecutive_failures = 0
     for sym in missing:
@@ -555,17 +549,15 @@ def _recover_missing_symbols(
         all_data = all_data.sort_index(axis=1)
 
     if report["recovered"] or report["failed"]:
-        msg = (f"Re-fetch: {len(report['recovered'])} of {len(report['missing'])} "
-               f"missing symbol(s) recovered"
-               + (f", {len(report['failed'])} still unavailable" if report["failed"] else ""))
-        if console is not None:
-            try:
-                if report["recovered"]:
-                    console.success(msg)
-                else:
-                    console.warning(msg)
-            except Exception:
-                pass
+        # Mechanics only. WHICH symbols were missing and what became of them is
+        # reported by the step that owns this fetch (app._log_recovery), so the
+        # two do not print the same list twice at different indents.
+        msg = (f"re-fetch · {len(report['recovered'])} of {len(report['missing'])} "
+               f"recovered on the second pass")
+        if report["failed"]:
+            console.warning(msg + f" · {len(report['failed'])} still unavailable")
+        else:
+            console.detail(msg)
     return all_data, report
 
 
@@ -607,12 +599,10 @@ def generate_historical_data(
     
     if len(symbols_to_process) > 500:
         metrics.add_warning(f"Large universe ({len(symbols_to_process)} symbols) - may be slow")
-        console_message = f"⚠️ Large universe: {len(symbols_to_process)} symbols (recommended: <300)"
-        try:
-            from logger_config import console
-            console.warning(console_message)
-        except Exception:
-            pass
+        console.warning(
+            f"Large universe: {len(symbols_to_process)} symbols (recommended: <300) - "
+            "the fetch and every downstream estimate will be slower"
+        )
     
     # === VALIDATION 2: Date Range ===
     if start_date > end_date:
@@ -647,7 +637,15 @@ def generate_historical_data(
                 progress=False,
             )
 
+        console.detail(
+            f"yfinance batch · {len(symbols_to_process)} symbols · "
+            f"{start_date:%Y-%m-%d} → {end_date:%Y-%m-%d}"
+        )
         all_data = download_data()
+        console.detail(
+            f"received {len(all_data.index)} bars × "
+            f"{len(getattr(all_data.get('Close', all_data), 'columns', []))} price columns"
+        )
         
     except Exception as e:
         # Circuit breaker or download failed
@@ -676,8 +674,9 @@ def generate_historical_data(
         metrics.data_recovery = recovery
         if recovery["recovered"]:
             metrics.add_warning(
-                f"Re-fetched {len(recovery['recovered'])} symbol(s) the batch download "
-                f"missed: {', '.join(recovery['recovered'])}"
+                f"Re-fetched {len(recovery['recovered'])} symbol(s) missed by the "
+                f"{start_date:%Y-%m-%d}→{end_date:%Y-%m-%d} batch: "
+                f"{', '.join(recovery['recovered'])}"
             )
 
     # === VALIDATION 4: Remove Failed Tickers ===
@@ -695,19 +694,17 @@ def generate_historical_data(
                 f"after re-fetch: {', '.join(invalid_tickers[:12])}"
                 + (" …" if len(invalid_tickers) > 12 else "")
             )
-            try:
-                from logger_config import console
-                if invalid_ratio > 0.5:
-                    console.warning(
-                        f"⚠️ {len(invalid_tickers)}/{len(symbols_to_process)} tickers have no data - check symbol validity"
-                    )
-                else:
-                    console.warning(
-                        f"Dropping {len(invalid_tickers)} symbol(s) with no data after re-fetch: "
-                        f"{', '.join(invalid_tickers[:12])}"
-                    )
-            except Exception:
-                pass
+            if invalid_ratio > 0.5:
+                console.warning(
+                    f"{len(invalid_tickers)}/{len(symbols_to_process)} tickers have no data "
+                    "- check symbol validity"
+                )
+            else:
+                console.warning(
+                    f"Dropping {len(invalid_tickers)} symbol(s) with no data after re-fetch: "
+                    f"{', '.join(invalid_tickers[:12])}"
+                    + (" …" if len(invalid_tickers) > 12 else "")
+                )
             
             if len(invalid_tickers) == len(symbols_to_process):
                 metrics.add_error(
@@ -766,12 +763,19 @@ def generate_historical_data(
             # was fixed) previously aborted the WHOLE data-fetch phase for
             # every symbol, not just the offending one. One bad ticker must
             # not fail the run — log and skip it instead.
-            try:
-                from logger_config import console
-                console.warning(f"Skipping {ticker}: indicator computation failed ({type(e).__name__}: {e})")
-            except Exception:
-                pass
+            console.warning(
+                f"Skipping {ticker}: indicator computation failed ({type(e).__name__}: {e})")
             continue
+
+    _skipped_indicators = [s for s in symbols_to_process if s not in ticker_indicator_cache]
+    console.detail(
+        f"indicators computed for {len(ticker_indicator_cache)} of "
+        f"{len(symbols_to_process)} symbols"
+        + (f" · {len(_skipped_indicators)} skipped" if _skipped_indicators else "")
+    )
+    if _skipped_indicators:
+        console.warning("No indicators for: " + ", ".join(_skipped_indicators[:12])
+                        + (" …" if len(_skipped_indicators) > 12 else ""))
 
     # 3. --- Generate Daily Snapshots in Memory ---
     pragati_data_list: List[Tuple[datetime, pd.DataFrame]] = []
@@ -806,11 +810,28 @@ def generate_historical_data(
     # forever at a frozen price. Leading NaNs are untouched (ffill only
     # propagates forward), so a symbol still cannot appear before its history
     # begins, and the warmup skip above is unaffected.
+    _filled_symbols, _filled_bars = 0, 0
     for _t in list(ticker_indicator_cache):
         _df = ticker_indicator_cache[_t]
         if _df is None or _df.empty:
             continue
-        ticker_indicator_cache[_t] = _df.reindex(date_range).ffill(limit=_STALE_BARS)
+        _aligned = _df.reindex(date_range)
+        _holes = int(_aligned["price"].isna().sum()) if "price" in _aligned.columns else 0
+        _aligned = _aligned.ffill(limit=_STALE_BARS)
+        _repaired = _holes - (int(_aligned["price"].isna().sum())
+                              if "price" in _aligned.columns else 0)
+        if _repaired > 0:
+            _filled_symbols += 1
+            _filled_bars += _repaired
+        ticker_indicator_cache[_t] = _aligned
+    if _filled_symbols:
+        # This is the repair that keeps a symbol which simply did not tick from
+        # dropping out of the book for a day, so its size is worth stating: a
+        # large number here means the panel is thin, not that the fill is wrong.
+        console.detail(
+            f"calendar alignment · carried {_filled_bars} missing bar(s) across "
+            f"{_filled_symbols} symbol(s) (limit {_STALE_BARS} bars)"
+        )
 
     for snapshot_date in date_range:
         # --- Only start generating snapshots *after* the indicator warmup
@@ -850,6 +871,19 @@ def generate_historical_data(
             
             final_df = final_df[COLUMN_ORDER]
             pragati_data_list.append((snapshot_date, final_df))
+
+    if pragati_data_list:
+        console.detail(
+            f"snapshots · {len(pragati_data_list)} days "
+            f"({pragati_data_list[0][0]:%Y-%m-%d} → {pragati_data_list[-1][0]:%Y-%m-%d}) · "
+            f"{len(_warm_dates)} warmup bars skipped · "
+            f"{len(pragati_data_list[-1][1])} symbols in the latest"
+        )
+    else:
+        console.warning(
+            f"No snapshots produced from {len(date_range)} bars — every date fell in the "
+            f"{MAX_INDICATOR_PERIOD}-bar warmup or past the end date"
+        )
 
     return pragati_data_list
 

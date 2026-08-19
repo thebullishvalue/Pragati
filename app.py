@@ -75,6 +75,7 @@ import streamlit.components.v1 as components
 from regime import (
     MarketRegimeDetector,
     REGIME_COLORS,
+    FACTOR_WEIGHTS,
     get_regime_history_series,
 )
 from backdata import (
@@ -87,7 +88,7 @@ from universe import (
     render_universe_selector,
 )
 from nco import (compute_nco_portfolio, METHOD_SPECS, METHOD_ORDER, method_spec,
-                 MOMENTUM_LOOKBACK, MOMENTUM_SKIP)
+                 MIN_COVERAGE, MOMENTUM_LOOKBACK, MOMENTUM_SKIP)
 
 try:
     from charts import (
@@ -170,9 +171,48 @@ def _init_session_state():
 # CACHED DATA FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Counts how many times the cached fetch below actually EXECUTED. Streamlit
+# exposes no hit/miss signal, and inferring one from elapsed time is a guess; a
+# caller that reads this counter either side of the call knows for certain
+# whether it paid for a download or reused the session's panel. That distinction
+# is the difference between a 12-second step and a 12-millisecond one, and the
+# terminal should say which happened rather than leave it to be inferred.
+_PANEL_FETCHES = {"n": 0}
+
+
+def _panel_fetch_count() -> int:
+    """How many historical-panel downloads have run in this session."""
+    return _PANEL_FETCHES["n"]
+
+
+def _log_recovery(step, previous) -> None:
+    """Report a re-fetch on the step that triggered it.
+
+    `metrics.data_recovery` holds the LAST report, and a run fetches two panels
+    (regime and estimation), so identity against the report seen before the call
+    is what says whether THIS step re-fetched anything.
+    """
+    report = getattr(get_metrics(), "data_recovery", None) or {}
+    if report is previous or not report.get("missing"):
+        return
+    step.item("Missing from batch", ", ".join(report["missing"]))
+    if report.get("recovered"):
+        step.item("Recovered on re-fetch", ", ".join(report["recovered"]))
+    if report.get("failed"):
+        step.note(f"{len(report['failed'])} symbol(s) still unavailable and dropped "
+                  f"from the universe: {', '.join(report['failed'])}")
+    if report.get("skipped_reason"):
+        step.note(f"second pass skipped ({report['skipped_reason']})")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_historical_data(end_date: datetime, lookback_files: int, symbols_key: str) -> List[Tuple[datetime, pd.DataFrame]]:
     """Fetch and cache historical indicator snapshots from yfinance."""
+    _PANEL_FETCHES["n"] += 1
+    # Announced here rather than by the caller: reaching this line IS the cache
+    # miss, and saying so before the download starts puts the explanation above
+    # the work instead of after it.
+    log.detail(f"cache MISS — fetching the {lookback_files}-day panel from yfinance")
     # Resolve symbols from the cache key
     try:
         if symbols_key.startswith("UNIVERSE:"):
@@ -185,6 +225,7 @@ def _load_historical_data(end_date: datetime, lookback_files: int, symbols_key: 
         if not symbols_list:
             raise ValueError("No symbols found in the selected universe.")
     except Exception as e:
+        log.error(f"Universe resolution failed inside the panel fetch: {e}")
         st.error(f"Error resolving universe: {e}")
         return []
     
@@ -195,6 +236,9 @@ def _load_historical_data(end_date: datetime, lookback_files: int, symbols_key: 
             end_date=end_date,
         )
     except Exception as e:
+        # Logged as well as surfaced: the browser message disappears on the next
+        # rerun, and this is the failure a terminal trace most needs to retain.
+        log.error(f"Data fetch failed ({type(e).__name__}): {e}")
         st.error(f"Data fetch failed: {e}")
         return []
 
@@ -229,8 +273,24 @@ _CALIBRATION_LOOKBACK_FILES = 375
 # nco.py. The previous hardcoded dict had to be kept in sync with six other
 # `curation == "EQUAL"` checks scattered through this file; those are now all
 # registry lookups.
-_NCO_STYLES = {METHOD_SPECS[k]["label"]: k for k in METHOD_ORDER}
+_NCO_STYLES = {str(METHOD_SPECS[k]["label"]): k for k in METHOD_ORDER}
 _STYLE_LABELS = list(_NCO_STYLES.keys())
+
+# The eight regime factors, in the order they are read: registry key, display
+# name, and the key holding that factor's own verdict ("STRONG_UPTREND",
+# "EXPANSION", …). Shared by the Regime tab and the run log so the terminal
+# trace and the screen cannot drift into naming or ordering the same eight
+# factors differently.
+REGIME_FACTOR_ORDER = [
+    ("momentum", "Momentum", "strength"),
+    ("trend", "Trend", "quality"),
+    ("breadth", "Breadth", "quality"),
+    ("velocity", "Velocity", "acceleration"),
+    ("extremes", "Extremes", "type"),
+    ("volatility", "Volatility", "regime"),
+    ("acceptance", "Acceptance", "state"),
+    ("correlation", "Correlation", "regime"),
+]
 
 
 def _num(value) -> Optional[float]:
@@ -336,10 +396,38 @@ def _analytics_series_cached(
     _port = pd.DataFrame({"symbol": list(symbols), "units": list(units)})
     anchor_dt = datetime.fromisoformat(anchor_iso)
     _alt = dict(zip(symbols, alt_units)) if alt_units else None
-    return build_return_series(
-        _port, days_back, bench_ticker, bench_name,
-        anchor_date=anchor_dt, alt_quantities=_alt,
-    )
+    # Logged from INSIDE the cached body, so the terminal shows this step only
+    # when it actually costs a download. A line on every rerun would say nothing
+    # about the run and bury the lines that do.
+    with log.task("Performance series",
+                  f"{days_back}d · {len(symbols)} holdings · vs {bench_name}") as _t:
+        _t.item("Anchor", anchor_dt.strftime("%Y-%m-%d"))
+        if _alt:
+            _t.detail("valuing the equal-weight shadow book on the same price panel")
+        result = build_return_series(
+            _port, days_back, bench_ticker, bench_name,
+            anchor_date=anchor_dt, alt_quantities=_alt,
+        )
+        _port_value, _, _bench_returns, _err, _unpriced, _, _ = result
+        if _err:
+            _t.fail(_err)
+        else:
+            if _unpriced:
+                # A dropped holding under-represents the book rather than
+                # failing it, which is exactly the kind of quiet distortion that
+                # has to be named.
+                _t.note(f"{len(_unpriced)} holding(s) could not be priced: "
+                        + ", ".join(str(s) for s in _unpriced[:8])
+                        + (" …" if len(_unpriced) > 8 else ""))
+            if _bench_returns is None:
+                _t.note(f"no {bench_name} series — the benchmark comparison will be empty")
+            _n_points = len(_port_value) if _port_value is not None else 0
+            _t.item("Window", f"{_port_value.index[0]:%Y-%m-%d} → {_port_value.index[-1]:%Y-%m-%d}"
+                    if _n_points else "empty")
+            _t.ok(f"{_n_points} daily points"
+                  + (f" · book {float(_port_value.iloc[-1] / _port_value.iloc[0] - 1):+.2%}"
+                     if _n_points > 1 and float(_port_value.iloc[0]) > 0 else ""))
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -627,21 +715,8 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
 
     # The regime detector uses FIXED factor weights (not calibrated); display them
     # so the percentages match what the composite actually used.
-    try:
-        from regime import FACTOR_WEIGHTS
-        _fw = FACTOR_WEIGHTS
-    except Exception:
-        _fw = {}
-    factor_order = [
-        ("momentum", "Momentum", "strength"),
-        ("trend", "Trend", "quality"),
-        ("breadth", "Breadth", "quality"),
-        ("velocity", "Velocity", "acceleration"),
-        ("extremes", "Extremes", "type"),
-        ("volatility", "Volatility", "regime"),
-        ("acceptance", "Acceptance", "state"),
-        ("correlation", "Correlation", "regime"),
-    ]
+    _fw = FACTOR_WEIGHTS
+    factor_order = REGIME_FACTOR_ORDER
     # Each factor score is a SIGNED value in [-2, +2] (bearish ↔ bullish), rendered
     # as a CENTER-ANCHORED diverging bar: a zero line in the middle, the fill
     # growing RIGHT (emerald) for a positive score or LEFT (rose) for a negative
@@ -1107,6 +1182,32 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
     ok = sum(1 for _, p, _, _, _ in results if p is not None)
     total_updated = sum(c for _, p, c, _, _ in results if p is not None)
     total_skipped_zero = sum(s for _, p, _, s, _ in results if p is not None)
+
+    # This tab re-runs on every widget interaction, and re-logging an unchanged
+    # result on each one would drown the run trace it sits under. The fingerprint
+    # makes the log fire on a CHANGE — a new upload, a different book — which is
+    # the only time there is something new to say.
+    if results:
+        _sync_print = (tuple(sorted((f, c, s, e is not None) for f, _, c, s, e in results)),
+                       tradable)
+        if st.session_state.get("_broker_sync_logged") != _sync_print:
+            st.session_state["_broker_sync_logged"] = _sync_print
+            with log.task("Broker sync",
+                          f"{n_templates} template(s) · {tradable} tradable holding(s)") as _t:
+                for _fname, _payload, _count, _skipped, _err in results:
+                    if _err is not None:
+                        _t.item(_fname, f"FAILED — {_err}")
+                    else:
+                        _t.item(_fname, f"{_count} instrument(s) updated"
+                                        + (f" · {_skipped} matched at zero units, left untouched"
+                                           if _skipped else ""))
+                if ok == n_templates:
+                    _t.ok(f"{total_updated} instrument(s) written across {ok} template(s)"
+                          + (f" · {total_skipped_zero} skipped at zero units"
+                             if total_skipped_zero else ""))
+                else:
+                    _t.warn(f"{ok} of {n_templates} template(s) synced · "
+                            f"{n_templates - ok} failed")
 
     with col1:
         if n_templates == 0:
@@ -1868,34 +1969,56 @@ def _run_analysis(
     st.session_state.debug_info = []
     st.session_state.regime_history_series = None
 
-    # Resolve the universe to get symbols
-    try:
-        symbols_list, status_msg = resolve_universe(universe, index)
-    except Exception as e:
-        st.error(f"Error resolving universe: {e}")
-        st.stop()
+    # The header states the REQUEST. Everything after it is the WORK, as a
+    # numbered sequence of steps — so the terminal reads as "this was asked for,
+    # and here is each thing that was done to answer it, in order, with what it
+    # produced and what it cost". Symbol count is deliberately NOT in the header:
+    # at this point nothing has been resolved, and the universe step reports it.
+    from logger_config import generate_run_id
+    current_run_id = generate_run_id()  # Fresh ID for each analysis
+    _universe_label = f"{universe} · {index}" if index else universe
+    log.main_header(f"PRAGYAM | Portfolio Intelligence | {VERSION}", {
+        "Analysis Date": selected_date_display,
+        "Universe": _universe_label,
+        "Investment Style": investment_style,
+        "Capital": f"₹{capital:,.0f}",
+        "Positions Requested": num_positions,
+        "Position Cap": f"{st.session_state.max_pos_pct*100:.0f}% per holding",
+        "Run ID": current_run_id[-12:],
+        "Started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
 
+    log.section("Data & Regime", phase="PHASE 1")
+
+    # Resolve the universe to get symbols
+    #
+    # Failure is reported on the step and acted on AFTER it closes: st.stop()
+    # unwinds by raising, so calling it inside the block would end the step
+    # without ever printing its outcome.
+    _resolve_err: Optional[Exception] = None
+    with log.task("Resolve universe", _universe_label) as _t:
+        try:
+            symbols_list, status_msg = resolve_universe(universe, index)
+        except Exception as e:
+            symbols_list, status_msg, _resolve_err = [], str(e), e
+        if _resolve_err is not None:
+            _t.fail(f"{type(_resolve_err).__name__}: {_resolve_err}")
+        elif not symbols_list:
+            _t.fail(status_msg or "no symbols returned")
+        else:
+            if status_msg:
+                _t.item("Source", status_msg)
+            _t.item("Members", ", ".join(symbols_list[:8])
+                    + (f" … (+{len(symbols_list) - 8})" if len(symbols_list) > 8 else ""))
+            _t.ok(f"{len(symbols_list)} symbols")
+    if _resolve_err is not None:
+        st.error(f"Error resolving universe: {_resolve_err}")
+        st.stop()
     if not symbols_list:
         st.error(f"Could not load {index or universe}: {status_msg}")
         st.stop()
 
     try:
-        # Print main header with run details
-        from logger_config import generate_run_id
-        current_run_id = generate_run_id()  # Fresh ID for each analysis
-        run_details = {
-            "Analysis Date": selected_date_display,
-            "Universe": universe,
-            "Index": index if index else "N/A",
-            "Symbols": len(symbols_list),
-            "Investment Style": investment_style,
-            "Capital": f"₹{capital:,.0f}",
-            "Positions": num_positions,
-            "Run ID": current_run_id[-12:],
-            "Started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        log.main_header(f"PRAGYAM | Portfolio Intelligence | {VERSION}", run_details)
-
         # Custom styled progress container (matches Nishkarsh)
         progress_container = st.empty()
 
@@ -1916,12 +2039,37 @@ def _run_analysis(
 
         metrics.start_phase("data_fetching")
 
-        if not symbols_list:
-            st.error("Symbol universe empty — select a valid universe.")
-            st.stop()
-
-        all_hist = _load_historical_data(selected_date, LOOKBACK_FILES, symbols_key)
+        # Everything the fetch was ASKED for goes in before it runs, so a hung or
+        # failed download still leaves the request on the record.
+        _panel_start = selected_date - timedelta(
+            days=int((LOOKBACK_FILES + MAX_INDICATOR_PERIOD) * 1.5) + 30)
+        with log.task("Historical panel",
+                      f"{LOOKBACK_FILES}-day lookback · {len(symbols_list)} symbols") as _t:
+            _t.item("Anchor", selected_date.strftime("%Y-%m-%d"))
+            _t.item("Download window",
+                    f"{_panel_start:%Y-%m-%d} → {selected_date:%Y-%m-%d} "
+                    f"({(selected_date - _panel_start).days} calendar days, "
+                    f"{MAX_INDICATOR_PERIOD} warmup bars)")
+            _fetches_before = _panel_fetch_count()
+            _rec_before = getattr(metrics, "data_recovery", None)
+            all_hist = _load_historical_data(selected_date, LOOKBACK_FILES, symbols_key)
+            if _panel_fetch_count() == _fetches_before:
+                _t.detail("cache HIT — panel reused from this session")
+            _log_recovery(_t, _rec_before)
+            if not all_hist:
+                _t.fail("no snapshots returned")
+            else:
+                _last_syms = {str(s) for s in all_hist[-1][1].get("symbol", [])}
+                _t.item("Panel span",
+                        f"{all_hist[0][0]:%Y-%m-%d} → {all_hist[-1][0]:%Y-%m-%d}")
+                _t.item("Latest snapshot",
+                        f"{len(_last_syms)} of {len(symbols_list)} symbols priced")
+                if len(_last_syms) < len(symbols_list):
+                    _t.note(f"{len(symbols_list) - len(_last_syms)} symbol(s) absent from the "
+                            "latest snapshot — they cannot be sized or held")
+                _t.ok(f"{len(all_hist)} trading days · {len(_last_syms)} symbols")
         if not all_hist:
+            log.error("No historical data loaded — check the universe selection and date range.")
             st.error("No historical data loaded. Check universe selection and date range.")
             st.stop()
 
@@ -1933,9 +2081,25 @@ def _run_analysis(
         # Regime detection — pass intelligence context so the 8 factor weights are
         # the learned ones (Intelligence mode) or the shared defaults (Standard).
         progress_bar(progress_container, 16, "Detecting Market Regime", "8-factor composite scoring")
-        regime_result = _detect_regime_cached(selected_date, symbols_key)
-        regime_name = regime_result.get("regime", "UNKNOWN")
-        confidence = regime_result.get("confidence", 0.0)
+        # Every factor is printed with the weight it carries into the composite,
+        # so the headline regime can be checked against its own inputs instead of
+        # being taken on trust.
+        with log.task("Market regime", "8-factor fixed-weight composite") as _t:
+            regime_result = _detect_regime_cached(selected_date, symbols_key)
+            regime_name = regime_result.get("regime", "UNKNOWN")
+            confidence = regime_result.get("confidence", 0.0)
+            _factors = regime_result.get("factors") or {}
+            for _fkey, _flabel, _fdesc_key in REGIME_FACTOR_ORDER:
+                _fd = _factors.get(_fkey) or {}
+                _t.item(f"{_flabel} ({FACTOR_WEIGHTS.get(_fkey, 0.0)*100:.0f}%)",
+                        f"{float(_fd.get('score', 0.0)):+.2f}  "
+                        f"{str(_fd.get(_fdesc_key, '—')).replace('_', ' ').lower()}")
+            _t.item("Composite", f"{float(regime_result.get('composite_score', 0.0)):+.3f}")
+            _t.item("Suggested mix", regime_result.get("mix_name", "—"))
+            if regime_name == "UNKNOWN":
+                _t.warn(f"UNKNOWN — {regime_result.get('explanation', 'no explanation given')}")
+            else:
+                _t.ok(f"{regime_name.replace('_', ' ')} · {confidence:.0%} confidence")
 
         st.session_state.regime_result_dict = regime_result
         st.session_state.suggested_mix = regime_result.get("mix_name", "Chop/Consolidate Mix")
@@ -1947,37 +2111,19 @@ def _run_analysis(
         st.session_state.training_data_window = all_hist
 
         if len(all_hist) < 10:
+            log.error(f"Insufficient training data: {len(all_hist)} trading days, 10 required. "
+                      "Pick an earlier anchor date or a longer-listed universe.")
             st.error(f"Insufficient training data: {len(all_hist)} days (need ≥10).")
             metrics.end_phase("data_fetching", success=False, error_msg=f"Insufficient data: {len(all_hist)} days")
             st.stop()
 
         if not st.session_state.suggested_mix:
+            log.error("Market regime could not be determined — no mix returned for this date.")
             st.error("Market regime could not be determined. Select a valid date.")
             metrics.end_phase("data_fetching", success=False, error_msg="Regime undetermined")
             st.stop()
 
         st.session_state.current_df = all_hist[-1][1] if all_hist else pd.DataFrame()
-
-        # Mirror the Phase 1 milestone to the terminal so the console trace
-        # carries the same checkpoints the progress bar showed.
-        log.section("Data & Regime", phase="PHASE 1")
-        log.item("Historical Panel", f"{len(all_hist)} trading days · {len(symbols_list)} symbols")
-        # What the batch download missed, and what the per-symbol second pass got
-        # back (backdata._recover_missing_symbols). Silence here means the batch
-        # returned everything; it is not the same as no second pass having run,
-        # which is why the failures are named rather than counted.
-        _rec = getattr(metrics, "data_recovery", None) or {}
-        if _rec.get("missing"):
-            log.item("Re-fetch",
-                     f"{len(_rec.get('recovered') or [])} of {len(_rec['missing'])} "
-                     f"missing symbol(s) recovered"
-                     + (f" · skipped ({_rec['skipped_reason']})"
-                        if _rec.get("skipped_reason") else ""))
-            if _rec.get("recovered"):
-                log.item("  recovered", ", ".join(_rec["recovered"]))
-            if _rec.get("failed"):
-                log.item("  unavailable", ", ".join(_rec["failed"]))
-        log.item("Market Regime", f"{regime_name.replace('_', ' ')} · {confidence:.0%} confidence")
 
         progress_bar(
             progress_container, 20, "Phase 1 Complete",
@@ -1989,10 +2135,21 @@ def _run_analysis(
         # the regime actually in effect at each historical date (see
         # Cached in session_state so the Regime tab's chart reuses this exact
         # computation instead of recomputing it.
-        try:
-            _regime_series_for_harvest = get_regime_history_series(all_hist, window_size=10, step=1)
-        except Exception:
-            _regime_series_for_harvest = []
+        with log.task("Regime history", "rolling 10-day windows, step 1") as _t:
+            try:
+                _regime_series_for_harvest = get_regime_history_series(all_hist, window_size=10, step=1)
+            except Exception as _e:
+                _regime_series_for_harvest = []
+                _t.fail(f"{type(_e).__name__}: {_e}")
+            else:
+                _seq = [getattr(r, "regime", None) for r in _regime_series_for_harvest]
+                _transitions = sum(1 for a, b in zip(_seq, _seq[1:]) if a != b)
+                if not _seq:
+                    _t.warn("no readings — the history chart will be empty")
+                else:
+                    _t.item("Span", f"{str(_seq[0]).replace('_', ' ')} → "
+                                    f"{str(_seq[-1]).replace('_', ' ')}")
+                    _t.ok(f"{len(_seq)} readings · {_transitions} regime transitions")
         st.session_state.regime_history_series = _regime_series_for_harvest
 
         # PHASE 2: COVARIANCE CURATION
@@ -2025,35 +2182,80 @@ def _run_analysis(
             }.get(_method, ("Measuring Risk Structure", _spec["formula"]))
             progress_bar(progress_container, 40, _stage40[0],
                          f"{_spec['short']} · {_stage40[1]}")
-            try:
+
+            log.section("Covariance Curation", phase="PHASE 2")
+
+            # Prices are the one input EVERY style needs — a name without one
+            # cannot be sized whatever the allocator decides — so what survives
+            # this filter is reported before any weighting happens.
+            with log.task("Price snapshot", f"{selected_date:%Y-%m-%d} close") as _t:
                 _cur = st.session_state.current_df
                 _prices = {
                     str(r["symbol"]): float(r["price"])
                     for _, r in _cur.iterrows()
                     if pd.notna(r.get("price")) and float(r.get("price") or 0) > 0
                 }
+                _unpriced = len(_cur) - len(_prices)
+                if _unpriced > 0:
+                    _t.note(f"{_unpriced} row(s) in the snapshot carry no usable price")
+                if not _prices:
+                    _t.fail("no priced symbols")
+                else:
+                    _t.ok(f"{len(_prices)} priced symbols of {len(symbols_list)} in the universe")
+
+            _book = pd.DataFrame()
+            _curation_error = None
+            try:
                 # Needs a deeper panel than the 126-day run window: a sample
                 # covariance over ~30 assets estimated from 126 observations is
                 # too ill-conditioned to cluster on. Reuses the same cache key
                 # as the calibration panel, so it is free whenever that has
                 # already been fetched.
-                _nco_hist = _load_historical_data(
-                    selected_date, _CALIBRATION_LOOKBACK_FILES, symbols_key
-                ) or all_hist
+                with log.task("Estimation panel",
+                              f"{_CALIBRATION_LOOKBACK_FILES}-day covariance window") as _t:
+                    _fetches_before = _panel_fetch_count()
+                    _rec_before = getattr(metrics, "data_recovery", None)
+                    _nco_hist = _load_historical_data(
+                        selected_date, _CALIBRATION_LOOKBACK_FILES, symbols_key
+                    ) or all_hist
+                    if _panel_fetch_count() == _fetches_before:
+                        _t.detail("cache HIT — panel reused from this session")
+                    _log_recovery(_t, _rec_before)
+                    if _nco_hist is all_hist:
+                        _t.note("deep panel unavailable — falling back to the "
+                                f"{LOOKBACK_FILES}-day regime panel")
+                    _t.item("Panel span",
+                            f"{_nco_hist[0][0]:%Y-%m-%d} → {_nco_hist[-1][0]:%Y-%m-%d}")
+                    _t.ok(f"{len(_nco_hist)} trading days")
+
                 _stage60 = ("Allocating Across Clusters" if _spec["uses_clusters"]
                             else "Balancing Risk Contributions" if _spec["rc_target"] == "equal"
                             else "Sizing Positions")
                 progress_bar(progress_container, 60, _stage60,
                              f"{len(_prices)} symbols · {_spec['short']}")
-                _book = compute_nco_portfolio(
-                    _nco_hist, _prices, capital, num_positions,
-                    method=_method, max_pos_pct=st.session_state.max_pos_pct,
-                )
+
+                with log.task("Allocate", f"{_spec['label']} · {_spec['formula']}") as _t:
+                    _t.item("Eligibility", "every priced symbol (estimates nothing)"
+                            if not _spec.get("needs_covariance", True)
+                            else f"names with ≥{MIN_COVERAGE:.0%} of the estimation window")
+                    _t.item("Requested", f"{num_positions} positions · "
+                                         f"cap {st.session_state.max_pos_pct*100:.0f}%")
+                    _book = compute_nco_portfolio(
+                        _nco_hist, _prices, capital, num_positions,
+                        method=_method, max_pos_pct=st.session_state.max_pos_pct,
+                    )
+                    if _book.empty:
+                        _t.fail("no book — see the reason below")
+                    else:
+                        _t.ok(f"{len(_book)} positions from "
+                              f"{_book.attrs.get('nco_universe', 0)} eligible names")
+
                 progress_bar(progress_container, 80, "Applying Position Cap",
                              f"max {st.session_state.max_pos_pct*100:.0f}% · "
                              f"{len(_book)} positions")
             except Exception as _e:
-                log.warning(f"{_spec['short']} curation failed: {type(_e).__name__}: {_e}")
+                _curation_error = _e
+                log.error(f"{_spec['short']} curation failed: {type(_e).__name__}: {_e}")
                 _book = pd.DataFrame()
 
             if _book.empty:
@@ -2061,6 +2263,14 @@ def _run_analysis(
                 # must not be told it did: the only way it comes back empty is
                 # that nothing in the universe had a usable price.
                 _needs_cov = bool(_spec.get("needs_covariance", True))
+                log.error(
+                    f"{_spec['label']} produced no portfolio — "
+                    + (f"{type(_curation_error).__name__}: {_curation_error}"
+                       if _curation_error is not None else
+                       "the return covariance was not estimable over this universe and date"
+                       if _needs_cov else
+                       "no symbol returned a usable price")
+                )
                 st.error(
                     f"{investment_style} could not build a portfolio — the return "
                     "covariance was not estimable (too few overlapping observations "
@@ -2089,61 +2299,94 @@ def _run_analysis(
                 "curation": _method,
             }
 
-            log.section("Covariance Curation", phase="PHASE 2")
-            log.item("Method", f"{_spec['label']} [{_spec['short']}] · {_spec['family']}")
-            log.item("Weight formula", _spec["formula"])
-            log.item("Estimation", f"{_book.attrs.get('nco_obs', 0)} daily observations · "
-                                   f"{_book.attrs.get('nco_estimation_universe', 0)} symbols")
-            # Name every symbol the coverage rule touched. A book built on 28 of
-            # 30 ETFs is correct when two of them listed this year, but it must
-            # never be left to the reader to work that out — and under Equal
-            # Weight those two names are HELD with no risk numbers, which is a
-            # different fact and has to read differently.
-            _excl = _book.attrs.get("nco_diagnostic_excluded") or {}
-            _excl_from_book = bool(_book.attrs.get("nco_universe_excluded"))
-            if _excl:
-                log.item("Universe",
-                         f"{_book.attrs.get('nco_universe', 0)} allocated · "
-                         f"{_book.attrs.get('nco_estimation_universe', 0)} with a covariance "
-                         f"estimate · {len(_excl)} below "
-                         f"{_book.attrs.get('nco_coverage_required', 0.8):.0%} history "
-                         + ("(excluded from the book)" if _excl_from_book
-                            else "(held, no risk diagnostics)"))
+            _at = _book.attrs
+            _disp = _num(_at.get("nco_rc_dispersion"))
+            _conc = _num(_at.get("nco_rc_concentration"))
+            _pvol = _num(_at.get("nco_port_vol_ann"))
+            _pcov = _num(_at.get("nco_rc_coverage"))
+
+            # What the allocator SAW: the panel it estimated on, the structure it
+            # found in it, and whether it hit the target it exists to hit.
+            with log.task("Risk structure",
+                          f"{_spec['short']} · {_spec['family']}") as _t:
+                _t.item("Estimation", f"{_at.get('nco_obs', 0)} daily observations · "
+                                      f"{_at.get('nco_estimation_universe', 0)} symbols")
+                # Name every symbol the coverage rule touched. A book built on 28
+                # of 30 ETFs is correct when two of them listed this year, but it
+                # must never be left to the reader to work that out — and under
+                # Equal Weight those two names are HELD with no risk numbers,
+                # which is a different fact and has to read differently.
+                _excl = _at.get("nco_diagnostic_excluded") or {}
+                _excl_from_book = bool(_at.get("nco_universe_excluded"))
+                _t.item("Universe", f"{_at.get('nco_universe', 0)} allocated · "
+                                    f"{_at.get('nco_estimation_universe', 0)} with a "
+                                    "covariance estimate"
+                        + (f" · {len(_excl)} below "
+                           f"{_at.get('nco_coverage_required', 0.8):.0%} history "
+                           + ("(excluded from the book)" if _excl_from_book
+                              else "(held, no risk diagnostics)") if _excl else ""))
                 for _sym, _d in sorted(_excl.items(), key=lambda kv: kv[1]["coverage"]):
-                    log.item(f"  {'excluded' if _excl_from_book else 'unestimated'} {_sym}",
-                             f"{_d['obs']}/{_d['window']} obs ({_d['coverage']:.0%})")
-            log.item("Clustering",
-                     (f"{_book.attrs.get('nco_clusters', 0)} clusters "
-                      f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})"
-                      if _book.attrs.get("nco_cov_estimable", True)
-                      else "not estimable for this window")
-                     + ("" if _spec["uses_clusters"] else " · diagnostic only"))
-            # Risk balance is the number that says whether the method achieved
-            # what it targets. Dispersion is the coefficient of variation of the
-            # risk contributions: 0.00 is perfect equal-risk.
-            # "—" rather than "nan": a book whose holdings have no covariance
-            # estimate has no dispersion, which is a different statement from a
-            # dispersion of zero.
-            _disp = _num(_book.attrs.get("nco_rc_dispersion"))
-            _conc = _num(_book.attrs.get("nco_rc_concentration"))
-            log.item("Risk balance",
-                     (f"dispersion {_disp:.3f} " if _disp is not None else "dispersion — ")
-                     + f"({'target 0.00' if _spec['rc_target'] == 'equal' else 'not targeted'})"
-                     + (f" · concentration {_conc:.2f}x equal share"
-                        if _conc is not None else " · concentration —"))
-            if _spec["uses_momentum"]:
-                log.item("Momentum tilt",
-                         f"{_book.attrs.get('nco_momentum_names', 0)} names scored "
-                         f"({MOMENTUM_LOOKBACK}-{MOMENTUM_SKIP} window) · "
-                         f"lambda {_book.attrs.get('nco_momentum_lambda', 0):.2f}"
-                         + ("" if _book.attrs.get("nco_momentum_applied") else " · NOT APPLIED"))
-            _pvol = _num(_book.attrs.get("nco_port_vol_ann"))
-            _pcov = _num(_book.attrs.get("nco_rc_coverage"))
-            log.item("Positions", f"{len(_book)} curated · ex-ante vol "
-                                  + (f"{_pvol:.2%}" if _pvol is not None else "—")
-                                  + (f" (over {_pcov:.0%} of book weight)"
-                                     if _pvol is not None and _pcov is not None
-                                     and _pcov < 0.999 else ""))
+                    _t.item(f"  {'excluded' if _excl_from_book else 'unestimated'} {_sym}",
+                            f"{_d['obs']}/{_d['window']} obs ({_d['coverage']:.0%})")
+                _t.item("Clustering",
+                        (f"{_at.get('nco_clusters', 0)} clusters "
+                         f"(silhouette {_at.get('nco_silhouette', 0):.3f})"
+                         if _at.get("nco_cov_estimable", True)
+                         else "not estimable for this window")
+                        + ("" if _spec["uses_clusters"] else " · diagnostic only"))
+                # Dispersion is the coefficient of variation of the risk
+                # contributions: 0.00 is perfect equal-risk. "—" rather than
+                # "nan" — a book whose holdings have no covariance estimate has
+                # no dispersion, which is not the same as a dispersion of zero.
+                _t.item("Risk balance",
+                        (f"dispersion {_disp:.3f} " if _disp is not None else "dispersion — ")
+                        + f"({'target 0.00' if _spec['rc_target'] == 'equal' else 'not targeted'})"
+                        + (f" · concentration {_conc:.2f}x equal share"
+                           if _conc is not None else " · concentration —"))
+                if _spec["uses_momentum"]:
+                    _t.item("Momentum tilt",
+                            f"{_at.get('nco_momentum_names', 0)} names scored "
+                            f"({MOMENTUM_LOOKBACK}-{MOMENTUM_SKIP} window) · "
+                            f"lambda {_at.get('nco_momentum_lambda', 0):.2f}"
+                            + ("" if _at.get("nco_momentum_applied") else " · NOT APPLIED"))
+                if not _at.get("nco_cov_estimable", True):
+                    _t.warn("no estimable covariance — book built without risk diagnostics")
+                else:
+                    _t.ok("ex-ante volatility "
+                          + (f"{_pvol:.2%}" if _pvol is not None else "—")
+                          + (f" (over {_pcov:.0%} of book weight)"
+                             if _pvol is not None and _pcov is not None
+                             and _pcov < 0.999 else ""))
+
+            # What the holder GETS: the same book expressed as capital, which is
+            # the only form of it that can be executed.
+            with log.task("Size positions",
+                          f"₹{capital:,.0f} · integer lots") as _t:
+                _deployed = float(pd.to_numeric(_book["value"], errors="coerce").fillna(0).sum())
+                _cash = capital - _deployed
+                _w = pd.to_numeric(_book["weightage_pct"], errors="coerce")
+                _cap_eff = _num(_at.get("max_pos_pct_eff")) or st.session_state.max_pos_pct
+                _t.item("Position cap",
+                        f"{_cap_eff*100:.1f}%"
+                        + (" (relaxed from "
+                           f"{st.session_state.max_pos_pct*100:.0f}% — infeasible at this "
+                           "position count)"
+                           if abs(_cap_eff - st.session_state.max_pos_pct) > 1e-9 else ""))
+                _t.item("Weights", f"min {_w.min():.2f}% · max {_w.max():.2f}% · "
+                                   f"equal share {100.0/len(_book):.2f}%")
+                _t.item("Deployed", f"₹{_deployed:,.0f} ({_deployed/capital:.1%}) · "
+                                    f"cash ₹{_cash:,.0f} ({_cash/capital:.1%})")
+                _t.item("Largest", " · ".join(
+                    f"{r['symbol']} {r['weightage_pct']:.1f}%"
+                    for _, r in _book.head(5).iterrows()))
+                if _at.get("nco_positions_short"):
+                    _t.warn(f"{len(_book)} of {num_positions} requested — "
+                            + ("the eligible universe ran out"
+                               if _at.get("nco_short_cause") == "universe"
+                               else "the allocator zeroed the remaining names"))
+                else:
+                    _t.ok(f"{len(_book)} positions · {int(_book['units'].sum()):,} units")
+
             metrics.end_phase("curation", success=True)
             metrics.symbols_count = _book.attrs.get("nco_universe", len(_book))
             metrics.strategies_count = 0
@@ -2169,11 +2412,20 @@ def _run_analysis(
         else:
             # Defends against a stale style left in session state by an older
             # build — every live style maps into _NCO_STYLES.
+            log.error(f"Unknown portfolio style: {investment_style!r} — "
+                      f"expected one of {', '.join(_STYLE_LABELS)}")
             st.error(f"Unknown portfolio style: {investment_style}")
             metrics.end_phase("curation", success=False, error_msg="Unknown style")
             st.stop()
 
     except Exception as e:
+        # The browser message is gone on the next rerun; the traceback is the
+        # only thing that says WHERE a run died, so it goes to the terminal.
+        import traceback as _tb
+        log.failure("Run aborted", f"{type(e).__name__}: {e}")
+        for _line in _tb.format_exc().rstrip().split("\n"):
+            log.text(_line)
+        metrics.add_error(type(e).__name__, str(e), "_run_analysis")
         st.error(f"Initialization failed: {e}")
 
 
@@ -2306,7 +2558,17 @@ def main():
         )
 
         if regime_needs_update and _likely_cached:
+            # `_likely_cached` is a heuristic, and the cache has a TTL. If it
+            # expires mid-session this "instant" call becomes the blocking
+            # sidebar download C4 exists to prevent — so the terminal says so,
+            # rather than emitting an unexplained burst of fetch lines.
+            _sidebar_fetches = _panel_fetch_count()
             rd = _detect_regime_cached(selected_date_obj, symbols_key)
+            if _panel_fetch_count() > _sidebar_fetches:
+                log.warning(
+                    "Sidebar regime card refetched the panel — the session cache expired, "
+                    "so this render blocked on a download"
+                )
             st.session_state.regime_result_dict = rd
             st.session_state.suggested_mix = rd.get("mix_name", "Chop/Consolidate Mix")
             st.session_state.regime_date = selected_date
