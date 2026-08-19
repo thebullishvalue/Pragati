@@ -43,15 +43,21 @@ from datetime import datetime
 # DESIGN SYSTEM — REGIME COLOURS / ICONS / LABELS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Seven regimes on a diverging ramp, drawn from the app's semantic palette
+# rather than from the stock Tailwind-500 hues this used to carry (#10b981 /
+# #f59e0b / #ef4444), which are tuned to pop on a marketing page and read as a
+# crypto dashboard on a dense grid. Bull and bear are the long/short pair at
+# two strengths; CHOP is deliberately NEUTRAL rather than amber — a sideways
+# market is not a warning — and only CRISIS earns caution.
 REGIME_COLORS: Dict[str, str] = {
-    "STRONG_BULL": "#10b981",  # Emerald
-    "BULL":        "#34d399",  # Light emerald
-    "WEAK_BULL":   "#a3e635",  # Lime
-    "CHOP":        "#f59e0b",  # Amber
-    "WEAK_BEAR":   "#fb923c",  # Orange
-    "BEAR":        "#ef4444",  # Red
-    "CRISIS":      "#dc2626",  # Deep red
-    "UNKNOWN":     "#6b7280",  # Gray
+    "STRONG_BULL": "#2CA36B",  # --long
+    "BULL":        "#4FB88A",  # --long, lightened
+    "WEAK_BULL":   "#7FC4A4",  # --long, faded toward neutral
+    "CHOP":        "#7E8797",  # --neutral
+    "WEAK_BEAR":   "#C98080",  # --short, faded toward neutral
+    "BEAR":        "#DD5A5A",  # --short
+    "CRISIS":      "#D79A3C",  # --caution, the one regime that IS a warning
+    "UNKNOWN":     "#5E6979",  # --ink-tertiary, deepened
 }
 
 REGIME_ICONS: Dict[str, str] = {

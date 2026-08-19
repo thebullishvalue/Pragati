@@ -639,11 +639,14 @@ def render_universe_selector() -> Tuple[str, Optional[str]]:
     Returns:
         Tuple of (universe, selected_index) where selected_index may be None
     """
+    # Label collapsed: the rail renders an "ANALYSIS UNIVERSE" group heading
+    # directly above this, and a widget label under it only says the same
+    # thing a second time in a second type size.
     universe = st.selectbox(
-        "Asset Class",
+        "Asset class",
         UNIVERSE_OPTIONS,
-        help="Choose the universe of securities to analyze",
-        label_visibility="visible"
+        help="The universe of securities to curate over.",
+        label_visibility="collapsed",
     )
 
     if universe == "Currency":

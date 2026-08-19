@@ -2,10 +2,11 @@
 PRAGYAM — Chart Components
 ══════════════════════════════════════════════════════════════════════════════
 
-Obsidian Quant Terminal Design System — Institutional-grade financial visualization.
+"Graphite" institutional design system — see ui/theme.py.
 
-All charts use chart_layout() and style_axes() from ui/theme.py for consistent theming.
-Aesthetics match Nishkarsh v1.2.0 chart patterns (line widths, fills, markers, trace colors).
+All charts use chart_layout() and style_axes() from ui/theme.py for consistent
+theming, and every colour comes from COLORS below, which resolves against the
+ACTIVE theme on each lookup.
 
 Author: @thebullishvalue
 """
@@ -14,40 +15,49 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 
-from ui.theme import chart_layout, style_axes
+from ui.theme import (chart_color, chart_layout, chart_rgba, diverging_scale,
+                      panel_bg, style_axes)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COLOR PALETTE — Terminal Glass
+# COLOR PALETTE — resolved live, never bound at import
 # ══════════════════════════════════════════════════════════════════════════════
 
-COLORS = {
-    # Primary: Amber Gold (system anchor)
-    "amber": "#D4A853",
-    "amber_dim": "rgba(212, 168, 83, 0.6)",
-    "amber_glow": "rgba(212, 168, 83, 0.25)",
 
-    # Heatmap / Signal: Diverging scale (Rose → Slate → Emerald)
-    # Bearish: Rose (sharp, warning)
-    "rose": "#E8555A",
-    "rose_dim": "rgba(232, 85, 90, 0.5)",
-    "rose_glow": "rgba(232, 85, 90, 0.2)",
-    # Neutral: Warm slate (not cold gray — maintains warmth)
-    "slate": "#8B7E6A",
-    "slate_dim": "rgba(139, 126, 106, 0.4)",
-    # Bullish: Emerald (rich, deep)
-    "emerald": "#2DD4A8",
-    "emerald_dim": "rgba(45, 212, 168, 0.5)",
-    "emerald_glow": "rgba(45, 212, 168, 0.2)",
+class _LivePalette:
+    """Semantic chart colours for the ACTIVE theme.
 
-    # Accent palette (used sparingly for UI elements)
-    "cyan": "#06B6D4",
-    "cyan_glow": "rgba(6, 182, 212, 0.2)",
-    "violet": "#8B5CF6",
-    "violet_glow": "rgba(139, 92, 246, 0.2)",
-    "orange": "#F59E0B",
-    "orange_glow": "rgba(245, 158, 11, 0.2)",
-}
+    A plain dict cannot work here. Its values would be bound the first time
+    this module is imported, and the theme can change AFTER that — so on Paper
+    every line, marker and fill would keep the hex it was given for graphite
+    while the axes and grid (which do read the theme) went dark. Half a chart
+    themed is worse than none of it: it reads as a rendering bug rather than a
+    palette.
+
+    Resolving on ``__getitem__`` keeps all ~20 call sites unchanged while making
+    each of them theme-aware. Keys are semantic — ``accent`` is the system's own
+    voice (the book, its targets, its cluster boundaries), ``emerald``/``rose``
+    are the risk-versus-capital claim, ``violet`` is the shadow book, ``cyan``
+    is the benchmark, ``slate`` is anything unclaimed. A ``_dim``/``_glow``
+    suffix returns the same hue at a fill's opacity.
+    """
+
+    _ALPHA = {"_dim": 0.45, "_glow": 0.18}
+
+    def __getitem__(self, key: str) -> str:
+        for suffix, alpha in self._ALPHA.items():
+            if key.endswith(suffix):
+                return chart_rgba(key[: -len(suffix)], alpha)
+        return chart_color(key)
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+COLORS = _LivePalette()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -101,7 +111,7 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
             x=dates + dates[::-1],
             y=upper_positive + lower_positive[::-1],
             fill="toself",
-            fillcolor="rgba(45, 212, 168, 0.07)",
+            fillcolor=chart_rgba("emerald", 0.07),
             line=dict(color="rgba(0,0,0,0)", width=0),
             hoverinfo="skip",
             showlegend=False,
@@ -117,7 +127,7 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
             x=dates + dates[::-1],
             y=upper_negative + lower_negative[::-1],
             fill="toself",
-            fillcolor="rgba(232, 85, 90, 0.07)",
+            fillcolor=chart_rgba("rose", 0.07),
             line=dict(color="rgba(0,0,0,0)", width=0),
             hoverinfo="skip",
             showlegend=False,
@@ -137,20 +147,25 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
                 size=marker_sizes,
                 color=colors,
                 symbol='circle',
-                line=dict(width=1, color='rgba(255,255,255,0.15)'),
+                line=dict(width=1, color=panel_bg()),
             ),
             customdata=list(zip(regimes, [f"{c:.0%}" for c in confs])),
             hovertemplate="<b>%{customdata[0]}</b><br>Score: %{y:+.2f}<br>Confidence: %{customdata[1]}<br><span style='opacity:0.7;'>%{x|%Y-%m-%d}</span><extra></extra>",
             fill='tozeroy',
-            fillcolor='rgba(139, 126, 106, 0.06)',
+            fillcolor=chart_rgba("slate", 0.06),
         )
     )
 
     # Reference lines — Terminal Glass aesthetic
+    # Thresholds, not data: a quarter-strength semantic tint each, resolved for
+    # the active theme. These were literal rgba() triples from the retired
+    # Obsidian palette — the amber one in particular is now the app's caution
+    # colour, so a routine "Chop" gridline was drawn in the one hue reserved
+    # for a warning.
     for y_val, color, label in [
-        (1.0, "rgba(45, 212, 168, 0.25)", "Bull"),
-        (0.1, "rgba(212, 168, 83, 0.25)", "Chop"),
-        (-0.5, "rgba(232, 85, 90, 0.25)", "Bear"),
+        (1.0, chart_rgba("emerald", 0.25), "Bull"),
+        (0.1, chart_rgba("slate", 0.3), "Chop"),
+        (-0.5, chart_rgba("rose", 0.25), "Bear"),
     ]:
         fig.add_hline(
             y=y_val,
@@ -159,7 +174,7 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
             line_width=0.8,
             annotation_text=label,
             annotation_position="right",
-            annotation_font=dict(color=color, size=10, family="IBM Plex Mono, monospace"),
+            annotation_font=dict(color=color, size=10, family="JetBrains Mono, monospace"),
             annotation_font_size=9,
             opacity=0.9,
         )
@@ -268,12 +283,23 @@ def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
     fig = go.Figure(go.Heatmap(
         z=z, x=df["symbol"].tolist(), y=labels,
         text=text, texttemplate="%{text}",
-        textfont=dict(size=9, family="IBM Plex Mono, monospace"),
-        colorscale=[[0.0, COLORS["rose"]], [0.5, COLORS["slate_dim"]], [1.0, COLORS["emerald"]]],
+        # The app's data face, at the axis tick tier. This said IBM Plex Mono,
+        # which is not among the fonts the stylesheet loads — so every cell
+        # label fell back to the system monospace and the one type in the app
+        # that was not ours sat inside the chart.
+        textfont=dict(size=9, family="JetBrains Mono, monospace"),
+        # Green is the calm end here, so the ramp runs rose -> panel -> emerald.
+        # The midpoint is the panel itself: a holding sitting at its peers'
+        # median has nothing to report, and nothing is what it should look like.
+        colorscale=diverging_scale("rose", "emerald"),
         zmid=0.0, zmin=-1.0, zmax=1.0, showscale=False, xgap=2, ygap=3,
         hovertemplate="<b>%{x}</b><br>%{y}: %{text}<extra></extra>",
     ))
-    fig.update_layout(**chart_layout(height=max(200, 46 * len(labels) + 90), show_legend=False))
+    _lab = max((len(str(s)) for s in df["symbol"]), default=8)
+    fig.update_layout(**chart_layout(
+        height=max(200, 46 * len(labels) + 90), show_legend=False,
+        margin=dict(t=12, l=96, r=16, b=min(150, 38 + int(_lab * 5.5))),
+    ))
     style_axes(fig)
     fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
     fig.update_yaxes(autorange="reversed")
@@ -335,10 +361,11 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
         marker=dict(color=[COLORS["rose"] if o else COLORS["emerald"] for o in over]),
         hovertemplate="<b>%{x}</b><br>Risk share %{y:.2f}%<extra></extra>",
     ))
-    fig.add_hline(y=eq, line=dict(color=COLORS["amber"], width=1.2, dash="dash"),
+    fig.add_hline(y=eq, line=dict(color=COLORS["accent"], width=1.2, dash="dash"),
                   annotation_text=f"equal share {eq:.2f}%",
-                  annotation_position="top right",
-                  annotation_font=dict(size=9, color=COLORS["amber"]))
+                  annotation_position="top left",
+                  annotation_font=dict(size=9, family="JetBrains Mono, monospace",
+                                       color=COLORS["accent"]))
 
     disp = attrs.get("nco_rc_dispersion")
     solved = attrs.get("nco_rc_dispersion_solved")
@@ -358,11 +385,19 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
         fig.add_annotation(
             xref="paper", yref="paper", x=0, y=1.10, showarrow=False,
             text=txt + ("  ✓ solver balanced" if ok else "  — solver did not converge"),
-            font=dict(size=10, color=COLORS["emerald"] if ok else COLORS["rose"]),
+            font=dict(size=10, family="JetBrains Mono, monospace",
+                      color=COLORS["emerald"] if ok else COLORS["rose"]),
             align="left",
         )
 
-    fig.update_layout(**chart_layout(height=max(260, 26 * 10 + 120), show_legend=True))
+    # Room for the rotated tickers AND the legend that docks under them. The
+    # shared bottom margin is sized for a handful of short categories; this
+    # chart carries one per holding, rotated, so it buys its own.
+    _lab = max((len(str(s)) for s in df["symbol"]), default=8)
+    fig.update_layout(**chart_layout(
+        height=max(300, 26 * 10 + 120), show_legend=True,
+        margin=dict(t=28, l=52, r=16, b=min(160, 58 + int(_lab * 5.5))),
+    ))
     fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08)
     style_axes(fig)
     fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
@@ -393,7 +428,9 @@ def create_cluster_correlation_heatmap(corr: "pd.DataFrame | None",
     syms = list(corr.columns)
     fig = go.Figure(go.Heatmap(
         z=corr.to_numpy(), x=syms, y=syms,
-        colorscale=[[0.0, COLORS["emerald"]], [0.5, "rgba(20,20,24,0.85)"], [1.0, COLORS["rose"]]],
+        # Red is a HIGH correlation — two holdings that are one bet — so the
+        # ramp runs emerald (diversifying) -> panel (unrelated) -> rose.
+        colorscale=diverging_scale("emerald", "rose"),
         zmid=0.0, zmin=-1.0, zmax=1.0, showscale=True,
         colorbar=dict(title=dict(text="ρ", font=dict(size=10)), thickness=10, len=0.7,
                       tickfont=dict(size=9)),
@@ -405,13 +442,21 @@ def create_cluster_correlation_heatmap(corr: "pd.DataFrame | None",
         seq = [cluster_labels.get(sm) for sm in syms]
         for i in range(1, len(seq)):
             if seq[i] != seq[i - 1]:
-                fig.add_shape(type="line", x0=i - 0.5, x1=i - 0.5, y0=-0.5, y1=len(syms) - 0.5,
-                              line=dict(color=COLORS["amber"], width=1.2))
-                fig.add_shape(type="line", y0=i - 0.5, y1=i - 0.5, x0=-0.5, x1=len(syms) - 0.5,
-                              line=dict(color=COLORS["amber"], width=1.2))
+                # A boundary is STRUCTURE, not a claim: it is drawn in the panel's
+                # own ground, so it reads as a gap cut through the field rather
+                # than as a third semantic colour competing with the data. In
+                # accent blue it was the most saturated thing on a matrix whose
+                # whole point is the red blocks.
+                for kw in ({"x0": i - 0.5, "x1": i - 0.5, "y0": -0.5, "y1": len(syms) - 0.5},
+                           {"y0": i - 0.5, "y1": i - 0.5, "x0": -0.5, "x1": len(syms) - 0.5}):
+                    fig.add_shape(type="line", line=dict(color=panel_bg(), width=2), **kw)
 
     size = max(320, min(620, 20 * len(syms) + 120))
-    fig.update_layout(**chart_layout(height=size, show_legend=False))
+    _lab = max((len(str(s)) for s in syms), default=8)
+    fig.update_layout(**chart_layout(
+        height=size, show_legend=False,
+        margin=dict(t=12, l=96, r=16, b=min(150, 38 + int(_lab * 5.5))),
+    ))
     style_axes(fig)
     fig.update_xaxes(tickangle=-60, tickfont=dict(size=8))
     fig.update_yaxes(tickfont=dict(size=8), autorange="reversed")
@@ -451,7 +496,7 @@ def create_benchmark_comparison_chart(
     fig.add_trace(go.Scatter(
         x=port_norm.index, y=port_norm.values, mode="lines",
         name=f"Portfolio ({port_return:+.2f}%)",
-        line=dict(color=COLORS["amber"], width=2.5),
+        line=dict(color=COLORS["accent"], width=2.5),
         hovertemplate="%{x|%b %d, %Y}<br>Portfolio: %{y:.2f}<extra></extra>",
     ))
 
