@@ -39,6 +39,14 @@ DEFAULT_BENCHMARK_TICKER = "^NSEI"
 DEFAULT_BENCHMARK_NAME = "NIFTY 50"
 
 # Selectable look-back windows (days). YTD is resolved at call time.
+#: Trading days below which a return is not annualized. Extrapolating a
+#: sub-quarter window by 252/n multiplies its noise by that same factor, so
+#: CAGR — and the annualized alpha built from two CAGRs — are withheld under
+#: this many aligned observations. Note what is NOT withheld: the period
+#: figures, which involve no extrapolation and are perfectly well defined over
+#: any window. See `alpha_period` in compute_metrics.
+CAGR_MIN_DAYS = 60
+
 TIMEFRAMES: Dict[str, Optional[int]] = {
     "1M": 30, "3M": 90, "6M": 180, "YTD": None,
     "1Y": 365, "2Y": 730, "5Y": 1825, "MAX": 3650,
@@ -233,7 +241,8 @@ def compute_metrics(
             "win_rate": 0, "win_days": 0, "lose_days": 0,
             "best_day": 0, "worst_day": 0,
             "skewness": 0, "kurtosis": 0, "profit_factor": 0,
-            "beta": 1, "alpha": 0, "correlation": 0, "r_squared": 0,
+            "beta": 1, "alpha": 0, "alpha_period": 0, "alpha_days": 0,
+            "correlation": 0, "r_squared": 0,
             "tracking_error": 0, "info_ratio": 0, "treynor": 0,
             "up_capture": 100, "down_capture": 100, "benchmark_return": 0,
         }
@@ -261,7 +270,7 @@ def compute_metrics(
     # via cagr_meaningful=False so the UI can hide those cards rather than
     # display a number that reads as precise but is actually noise amplified
     # by a large extrapolation factor.
-    m["cagr_meaningful"] = n_days >= 60
+    m["cagr_meaningful"] = n_days >= CAGR_MIN_DAYS
     if total_ret > -1:
         if n_days < 20:
             m["cagr"] = total_ret * (252 / n_days) * 100
@@ -331,7 +340,8 @@ def compute_metrics(
 
     # Benchmark defaults
     m.update({
-        "beta": 1, "alpha": 0, "correlation": 0, "r_squared": 0,
+        "beta": 1, "alpha": 0, "alpha_period": 0, "alpha_days": 0,
+        "correlation": 0, "r_squared": 0,
         "tracking_error": 0, "info_ratio": 0, "treynor": 0,
         "up_capture": 100, "down_capture": 100, "benchmark_return": 0,
     })
@@ -374,8 +384,26 @@ def compute_metrics(
             # a function of two CAGRs) — gate it on the same aligned-window
             # day count rather than the portfolio's own (possibly longer,
             # pre-alignment) n_days.
-            m["cagr_meaningful"] = m["cagr_meaningful"] and aligned_days >= 60
+            m["cagr_meaningful"] = m["cagr_meaningful"] and aligned_days >= CAGR_MIN_DAYS
             m["alpha"] = (p_cagr - expected_return) * 100
+
+            # PERIOD alpha — the same CAPM residual, computed on the window's
+            # own raw returns with nothing annualized.
+            #
+            # The annualized alpha above is withheld under CAGR_MIN_DAYS
+            # because extrapolating by 252/n amplifies the estimate's noise by
+            # that factor. The residual itself carries no such defect: "did the
+            # book beat what its beta entitled it to, over these six weeks" is
+            # a well-posed question with a well-defined answer on any window
+            # long enough to fit a beta. Withholding BOTH numbers reported a
+            # measurement problem the short window does not actually have, and
+            # left a book anchored a few weeks ago with a dash where its one
+            # risk-adjusted verdict belongs.
+            rf_period = rf_rate * (aligned_days / 252.0)
+            m["alpha_period"] = (
+                p_total_aligned - (rf_period + m["beta"] * (b_total - rf_period))
+            ) * 100
+            m["alpha_days"] = int(aligned_days)
 
             corr = p_ret.corr(b_ret)
             m["correlation"] = corr if not np.isnan(corr) else 0
@@ -521,6 +549,7 @@ def build_return_series(
 
 
 __all__ = [
+    "CAGR_MIN_DAYS",
     "TIMEFRAMES",
     "RISK_FREE_RATE",
     "US_RISK_FREE_RATE",

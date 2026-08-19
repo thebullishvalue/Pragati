@@ -66,16 +66,25 @@ COLORS = _LivePalette()
 
 
 def create_regime_history_chart(regime_series: list) -> go.Figure:
-    """Timeline chart of market regime transitions over a rolling window.
+    """Timeline of the composite regime score over a rolling window.
 
-    Matches Nishkarsh aesthetic: subtle reference lines, dual-fill pattern,
-    dynamic marker sizing, no marker borders, 1.5px line width.
+    ONE LINE, ONE COLOUR. The score is the system's own reading, so it is drawn
+    in the accent — the system's voice — and nothing else on the plot competes
+    with it. Each point used to be coloured by its own regime, which put seven
+    hues on one series: a rainbow, in a design system whose rule is that a
+    colour carries a claim. The regime is already stated by WHERE the line sits
+    against the labelled bands behind it; colouring the point as well says it
+    twice and reserves no hue for anything that needs one.
 
-    Trace colors match Nishkarsh exactly:
-    - Main line: amber (#D4A853) at 1.5px
-    - Positive fills: emerald rgba(52,211,153,0.06/0.08)
-    - Negative fills: rose rgba(251,113,133,0.06/0.08)
-    - Reference lines: 0.5px at 15% opacity
+    The confidence band is the one place a tint earns its keep: it widens where
+    the eight factors agree and narrows where they do not, so the reader can
+    see how much to trust the line's position without a second chart. It takes
+    the accent at fill strength rather than green/red, because a wide band is
+    not bullish — it is confident.
+
+    Straight segments, not splines. A spline draws values between readings that
+    were never computed; on a series whose whole claim is "this is what the
+    composite measured on these dates", the curve is a fiction.
 
     Args:
         regime_series: List of RegimeResult objects from get_regime_history_series().
@@ -90,73 +99,44 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
 
     dates = [r.date for r in regime_series]
     scores = [r.composite_score for r in regime_series]
-    colors = [r.color for r in regime_series]
     regimes = [r.regime.replace("_", " ") for r in regime_series]
     confs = [r.confidence for r in regime_series]
 
-    # Dynamic marker sizing based on confidence (matches Nishkarsh pattern)
+    # Marker size carries confidence: a firmer reading is a bigger dot.
     marker_sizes = [7 if c >= 0.7 else 5 if c >= 0.5 else 4 for c in confs]
 
     fig = go.Figure()
 
-    # Upper band (invisible line for fill pattern - Nishkarsh style)
-    upper = [s + c * 0.4 for s, c in zip(scores, confs)]
-    lower = [s - c * 0.4 for s, c in zip(scores, confs)]
+    # ── Confidence band ───────────────────────────────────────────────────
+    # One band, drawn as a single closed polygon around the line. It was two
+    # polygons — the part above zero tinted green and the part below tinted
+    # red — which made the WIDTH of the band, its only meaning, read as a
+    # direction instead. Width is agreement; the line's position is direction.
+    upper = [s_ + c * 0.4 for s_, c in zip(scores, confs)]
+    lower = [s_ - c * 0.4 for s_, c in zip(scores, confs)]
+    fig.add_trace(go.Scatter(
+        x=dates + dates[::-1], y=upper + lower[::-1],
+        fill="toself", fillcolor=chart_rgba("accent", 0.08),
+        line=dict(color="rgba(0,0,0,0)", width=0),
+        hoverinfo="skip", showlegend=False, name="",
+    ))
 
-    # Positive confidence fill (above zero)
-    upper_positive = [max(0, u) for u in upper]
-    lower_positive = [max(0, l) for l in lower]
-    fig.add_trace(
-        go.Scatter(
-            x=dates + dates[::-1],
-            y=upper_positive + lower_positive[::-1],
-            fill="toself",
-            fillcolor=chart_rgba("emerald", 0.07),
-            line=dict(color="rgba(0,0,0,0)", width=0),
-            hoverinfo="skip",
-            showlegend=False,
-            name="",
-        )
-    )
+    # ── The composite ─────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=dates, y=scores, mode="lines+markers", name="Composite score",
+        line=dict(color=COLORS["accent"], width=2),
+        # Size still carries confidence — a bigger dot is a firmer reading —
+        # but every dot is the same colour as its line. Seven regime hues on
+        # one series was the only rainbow left in the app.
+        marker=dict(size=marker_sizes, color=COLORS["accent"], symbol="circle",
+                    line=dict(width=1, color=panel_bg())),
+        customdata=list(zip(regimes, [f"{c:.0%}" for c in confs])),
+        hovertemplate="<b>%{customdata[0]}</b><br>Score: %{y:+.2f}"
+                      "<br>Confidence: %{customdata[1]}"
+                      "<br><span style='opacity:0.7;'>%{x|%Y-%m-%d}</span><extra></extra>",
+    ))
 
-    # Negative confidence fill (below zero)
-    upper_negative = [min(0, u) for u in upper]
-    lower_negative = [min(0, l) for l in lower]
-    fig.add_trace(
-        go.Scatter(
-            x=dates + dates[::-1],
-            y=upper_negative + lower_negative[::-1],
-            fill="toself",
-            fillcolor=chart_rgba("rose", 0.07),
-            line=dict(color="rgba(0,0,0,0)", width=0),
-            hoverinfo="skip",
-            showlegend=False,
-            name="",
-        )
-    )
-
-    # Composite score line — warm slate
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=scores,
-            mode="lines+markers",
-            name="Composite Score",
-            line=dict(color=COLORS["slate"], width=2.5, shape='spline'),
-            marker=dict(
-                size=marker_sizes,
-                color=colors,
-                symbol='circle',
-                line=dict(width=1, color=panel_bg()),
-            ),
-            customdata=list(zip(regimes, [f"{c:.0%}" for c in confs])),
-            hovertemplate="<b>%{customdata[0]}</b><br>Score: %{y:+.2f}<br>Confidence: %{customdata[1]}<br><span style='opacity:0.7;'>%{x|%Y-%m-%d}</span><extra></extra>",
-            fill='tozeroy',
-            fillcolor=chart_rgba("slate", 0.06),
-        )
-    )
-
-    # Reference lines — Terminal Glass aesthetic
+    # ── Regime thresholds ────────────────────────────────────────────────
     # Thresholds, not data: a quarter-strength semantic tint each, resolved for
     # the active theme. These were literal rgba() triples from the retired
     # Obsidian palette — the amber one in particular is now the app's caution
@@ -179,10 +159,8 @@ def create_regime_history_chart(regime_series: list) -> go.Figure:
             opacity=0.9,
         )
 
-    # Apply Obsidian Quant theme
     fig.update_layout(**chart_layout(height=320, show_legend=False))
-    style_axes(fig, y_title="Composite Score", y_range=[-2.5, 2.5])
-    
+    style_axes(fig, y_title="Composite score", y_range=[-2.5, 2.5])
     return fig
 
 
@@ -361,11 +339,13 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
         marker=dict(color=[COLORS["rose"] if o else COLORS["emerald"] for o in over]),
         hovertemplate="<b>%{x}</b><br>Risk share %{y:.2f}%<extra></extra>",
     ))
-    fig.add_hline(y=eq, line=dict(color=COLORS["accent"], width=1.2, dash="dash"),
-                  annotation_text=f"equal share {eq:.2f}%",
-                  annotation_position="top left",
-                  annotation_font=dict(size=9, family="JetBrains Mono, monospace",
-                                       color=COLORS["accent"]))
+    # The reference line carries no label. It had one — "equal share 3.33%",
+    # pinned inside the plot at the top left — and inside a 30-bar chart there
+    # is no corner that stays empty: at top right it sat under the legend, at
+    # top left it sat over the first two bars. The panel header already states
+    # the number ("capital vs variance · equal share 3.33%"), so the label was
+    # a second copy of a fact competing with the data for the same pixels.
+    fig.add_hline(y=eq, line=dict(color=COLORS["accent"], width=1.2, dash="dash"))
 
     disp = attrs.get("nco_rc_dispersion")
     solved = attrs.get("nco_rc_dispersion_solved")
@@ -390,15 +370,26 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
             align="left",
         )
 
-    # Room for the rotated tickers AND the legend that docks under them. The
-    # shared bottom margin is sized for a handful of short categories; this
-    # chart carries one per holding, rotated, so it buys its own.
+    # THE LEGEND GOES ABOVE, not below.
+    # `chart_layout` docks it under the x-axis, which is right for a handful of
+    # short categories and wrong here: this chart carries one rotated ticker
+    # per holding, so "under the axis" IS the label block, and the legend
+    # printed straight through it. `y` is a fraction of the PLOT area, so
+    # buying more bottom margin moved the plot up and took the legend with it —
+    # the overlap survived every margin I gave it. Above the plot the space is
+    # genuinely empty, and the two series are named before they are read.
     _lab = max((len(str(s)) for s in df["symbol"]), default=8)
     fig.update_layout(**chart_layout(
         height=max(300, 26 * 10 + 120), show_legend=True,
-        margin=dict(t=28, l=52, r=16, b=min(160, 58 + int(_lab * 5.5))),
+        margin=dict(t=44, l=52, r=16, b=min(150, 38 + int(_lab * 5.5))),
     ))
-    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08)
+    fig.update_layout(
+        barmode="group", bargap=0.25, bargroupgap=0.08,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=10, family="JetBrains Mono, monospace"),
+                    itemsizing="constant"),
+    )
     style_axes(fig)
     fig.update_xaxes(tickangle=-60, tickfont=dict(size=9))
     fig.update_yaxes(title_text="% of book", tickfont=dict(size=9))

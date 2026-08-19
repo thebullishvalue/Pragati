@@ -444,26 +444,23 @@ def _render_header() -> None:
 #: blocks did.
 _SYSTEM_PANELS = (
     ("portfolio", "PORTFOLIO", "Covariance curation",
-     "Capital is allocated from the return covariance structure. Nothing here forecasts "
-     "returns — the book is built to spread risk across genuinely distinct exposures, "
-     "not to predict which holding will win.",
-     (("Cluster", "Ward linkage on correlation distance"),
-      ("Allocate", "1/N · equal risk contribution · cluster bisection"),
-      ("Targets", "Volatility and drawdown, not excess return"))),
+     "Capital is allocated from the return covariance. Nothing forecasts a return — "
+     "the book spreads risk across distinct exposures rather than picking winners.",
+     (("Cluster", "Ward on correlation distance"),
+      ("Allocate", "1/N · equal risk · cluster bisection"),
+      ("Targets", "Volatility and drawdown"))),
     ("regime", "REGIME", "Eight-factor context",
-     "A fixed-weight composite of eight measured factors, read over a rolling window. "
-     "It is context for reading the book: nothing downstream is conditioned on it, and "
-     "no weight changes because of it.",
+     "A fixed-weight composite of eight measured factors over a rolling window. "
+     "Context for reading the book — no weight changes because of it.",
      (("Factors", "Momentum · trend · breadth · velocity"),
-      ("Output", "Composite score and confidence"),
+      ("Output", "Score and confidence"),
       ("History", "Rolling-window timeline"))),
     ("structure", "RISK STRUCTURE", "What the allocator saw",
-     "The correlation matrix reordered by cluster, so the blocks that drive the "
-     "allocation are visible rather than implied — alongside each holding's own share "
-     "of variance against its share of capital.",
-     (("Clusters", "Silhouette-selected, typically ~3"),
-      ("Per-holding", "Weight · risk share · volatility · independence"),
-      ("Benchmark", "Equal-weight shadow of the same book"))),
+     "The correlation matrix reordered by cluster, so the blocks driving the "
+     "allocation are visible — with each holding's variance share against its capital.",
+     (("Clusters", "Silhouette-selected"),
+      ("Per holding", "Weight · risk · vol · independence"),
+      ("Benchmark", "Equal-weight shadow book"))),
 )
 
 
@@ -476,10 +473,28 @@ def _render_landing_page() -> None:
     run anything needs to know what the thing IS before they are shown what it
     covers.
     """
+    # THE CLAIM SAYS WHAT THE PRODUCT DOES.
+    #
+    # It used to read "Selection and weighting both come from the return
+    # covariance structure, and no part of the system forecasts a return" —
+    # which is a disclaimer, not a description. It led with an absence, so the
+    # first sentence of the product described something the product is not.
+    #
+    # It was also not true of all three styles: Equal Weight is deliberately no
+    # longer confined to the covariance-eligible names (see
+    # nco.compute_nco_portfolio), so neither its selection nor its weighting
+    # comes from the covariance at all.
+    #
+    # What IS true of every style, and is the actual product: it measures how
+    # the holdings move together, and it puts each holding's share of variance
+    # next to its share of capital. The non-forecasting thesis is not lost —
+    # the PORTFOLIO panel below states it, and the Coverage strip and the
+    # Targets row both carry it — it just stops being the opening line.
     st.markdown(
         """<div class="lede">
-  <div class="lede-claim">Selection and weighting both come from the return covariance
-    structure, and no part of the system forecasts a return.</div>
+  <div class="lede-claim">The system curates a book by measuring how its holdings move
+    together, then shows what each one contributes to risk against what it costs
+    in capital.</div>
   <div class="lede-cta">Pick a date, a universe and a style in the rail, then
     <strong>Run Analysis</strong>.</div>
 </div>""",
@@ -487,7 +502,8 @@ def _render_landing_page() -> None:
     )
 
     # ── Coverage — the app's own KPI grammar, not a bespoke number row ─────
-    render_section_header("Coverage", icon="layers")
+    render_section_header("Coverage", "Styles, estimation window and position cap · "
+                          "fixed before any run", icon="layers", accent="accent")
     render_kpi_strip(
         [
             {"label": "Portfolio Styles", "value": str(len(STYLE_LABELS)),
@@ -505,7 +521,8 @@ def _render_landing_page() -> None:
     )
 
     # ── The three systems, as panels ──────────────────────────────────────
-    render_section_header("Systems", icon="cpu")
+    render_section_header("Systems", "Three subsystems, one pipeline · every style "
+                          "travels all of it", icon="cpu", accent="violet")
     cols = st.columns(3, gap="small")
     for col, (cls, name, kicker, body, specs) in zip(cols, _SYSTEM_PANELS):
         with col:
@@ -523,7 +540,8 @@ def _render_landing_page() -> None:
                 )
 
     # ── What a run returns ────────────────────────────────────────────────
-    render_section_header("What a run returns", icon="target")
+    render_section_header("What a Run Returns", "Four outputs, on the page rather "
+                          "than in a log", icon="target", accent="emerald")
     _out = (
         ("A curated book", "Holdings, units and value, with the weight formula that "
                            "produced them and the cap that bounded them."),
@@ -584,12 +602,41 @@ def _book_notices(portfolio: pd.DataFrame, ctx: dict) -> "list[dict]":
             "body": "The book is unaffected — this style reads no covariance — but the "
                     "cluster, risk and correlation diagnostics are unavailable.",
         })
-    if at.get("nco_positions_short"):
+    # ONE EVENT, ONE NOTICE.
+    #
+    # A symbol the data source cannot deliver is dropped from the universe
+    # before the allocator ever sees it, so a failed re-fetch and a book that
+    # came up short are frequently the SAME event reported twice. The rail was
+    # stacking "the eligible universe ran out" directly above "1 symbol(s)
+    # unavailable from the data source" and leaving the reader to infer a
+    # causal link the code already knows — two warnings for one problem, which
+    # reads as two problems. Where they coincide, the shortfall notice names
+    # the cause and the second notice stands down.
+    recovery = getattr(get_metrics(), "data_recovery", None) or {}
+    failed = [str(s) for s in (recovery.get("failed") or [])]
+    short = int(at.get("nco_positions_short", 0) or 0)
+    short_from_universe = at.get("nco_short_cause") == "universe"
+    caused_by_fetch = bool(short and short_from_universe and failed)
+
+    if short:
+        if caused_by_fetch:
+            # Say "matches exactly" only when it does. A universe short by five
+            # with one failed fetch is a contribution, not the whole story, and
+            # claiming otherwise would be a worse error than the split notice.
+            _lead = ("The eligible universe ran out, and the shortfall is exactly the "
+                     "symbol(s) the data source could not deliver"
+                     if len(failed) == short else
+                     "The eligible universe ran out, and the data source contributed to it")
+            _body = (f"{_lead}: {', '.join(sorted(failed))} — dropped before allocation "
+                     f"after a dedicated re-fetch also failed.")
+        elif short_from_universe:
+            _body = "The eligible universe ran out."
+        else:
+            _body = "The allocator zeroed the remaining names."
         out.append({
             "kind": "warning",
-            "title": f"{at['nco_positions_short']} position(s) short of the request",
-            "body": ("The eligible universe ran out." if at.get("nco_short_cause") == "universe"
-                     else "The allocator zeroed the remaining names."),
+            "title": f"{short} position(s) short of the request",
+            "body": _body,
         })
     cap_eff = num(at.get("max_pos_pct_eff"))
     cap_nom = num(st.session_state.get("max_pos_pct"))
@@ -600,13 +647,22 @@ def _book_notices(portfolio: pd.DataFrame, ctx: dict) -> "list[dict]":
             "body": f"A {cap_nom:.0%} cap and full allocation are not simultaneously "
                     f"satisfiable at this position count.",
         })
-    recovery = getattr(get_metrics(), "data_recovery", None) or {}
-    if recovery.get("failed"):
+    if failed and not caused_by_fetch:
+        # Reached when the drop did not cause the shortfall — either the book is
+        # complete, or it is short for an unrelated reason the notice above
+        # already names. Only the first of those may claim a full position
+        # count, so the closing sentence is gated on the count and not on the
+        # branch: a book short because the allocator zeroed names is still short
+        # while this fires.
         out.append({
-            "kind": "warning",
-            "title": f"{len(recovery['failed'])} symbol(s) unavailable from the data source",
+            "kind": "info" if not short else "warning",
+            "title": f"{len(failed)} symbol(s) unavailable from the data source",
             "body": f"Dropped from the universe after a dedicated re-fetch: "
-                    f"{', '.join(recovery['failed'])}.",
+                    f"{', '.join(sorted(failed))}."
+                    + (" The book still reached its full position count, so nothing "
+                       "was lost but the choice." if not short else
+                       " The universe was that much smaller before the allocator "
+                       "ran, though it is not what the book came up short on."),
         })
     return out
 
