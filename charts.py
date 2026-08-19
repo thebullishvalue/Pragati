@@ -232,7 +232,11 @@ def create_risk_allocation_heatmap(portfolio: pd.DataFrame) -> go.Figure:
     n = len(df)
     eq_share = 1.0 / n if n else 0.0
     w = pd.to_numeric(df["weightage_pct"], errors="coerce").fillna(0.0) / 100.0
-    rc = pd.to_numeric(df["risk_contribution"], errors="coerce").fillna(eq_share)
+    # NaN is left NaN on purpose: a holding with no covariance estimate (Equal
+    # Weight can hold one) has no risk share, and filling it with the equal
+    # share would print a fabricated number in a cell the table shows as "—".
+    # Unranked NaN falls to the neutral colour and renders as an em dash below.
+    rc = pd.to_numeric(df["risk_contribution"], errors="coerce")
     vol = pd.to_numeric(df["volatility"], errors="coerce")
     indep = 1.0 - pd.to_numeric(df["corr_to_book"], errors="coerce").abs()
     momz = pd.to_numeric(df["momentum_z"], errors="coerce")
@@ -312,7 +316,9 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
     n = len(df)
     eq = 100.0 / n if n else 0.0
     w = pd.to_numeric(df["weightage_pct"], errors="coerce").fillna(0.0)
-    rc = pd.to_numeric(df["risk_contribution"], errors="coerce").fillna(0.0) * 100.0
+    # Unestimated holdings draw NO risk bar rather than a zero one: zero risk is
+    # a measurement, and this is the absence of one.
+    rc = pd.to_numeric(df["risk_contribution"], errors="coerce") * 100.0
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -336,7 +342,10 @@ def create_risk_contribution_chart(portfolio: pd.DataFrame) -> go.Figure:
 
     disp = attrs.get("nco_rc_dispersion")
     solved = attrs.get("nco_rc_dispersion_solved")
-    if rc_target == "equal" and disp is not None:
+    # `disp` is NaN when no holding carried a covariance estimate. Unreachable
+    # for an rc_target=="equal" style (it cannot solve without one), but the
+    # annotation would read "did not converge" rather than "not measured".
+    if rc_target == "equal" and disp is not None and np.isfinite(disp):
         # Two numbers, not one. The solver's own dispersion says whether it
         # converged; the realised dispersion says what the held book looks like
         # after top-N selection and the position cap have pulled it away from

@@ -96,6 +96,12 @@ class ExecutionMetrics:
     errors: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     
+    # Data quality — what the batch download missed and what the per-symbol
+    # second pass got back (see backdata._recover_missing_symbols). Kept here
+    # rather than logged and forgotten so the UI can state which symbols the
+    # book was built WITHOUT.
+    data_recovery: Dict[str, Any] = field(default_factory=dict)
+    
     # System
     memory_peak_mb: float = 0.0
     cpu_percent: float = 0.0
@@ -190,6 +196,11 @@ class ExecutionMetrics:
                 "by_type": self.get_error_summary()
             },
             "warnings_count": len(self.warnings),
+            "data_recovery": {
+                "missing": len(self.data_recovery.get("missing", [])),
+                "recovered": len(self.data_recovery.get("recovered", [])),
+                "failed": len(self.data_recovery.get("failed", [])),
+            },
             "system": {
                 "memory_peak_mb": round(self.memory_peak_mb, 2),
                 "cpu_percent": round(self.cpu_percent, 1)

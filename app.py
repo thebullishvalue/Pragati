@@ -48,7 +48,7 @@ import pandas as pd
 import numpy as np
 import warnings
 from datetime import datetime, date, timedelta, timezone
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -233,6 +233,22 @@ _NCO_STYLES = {METHOD_SPECS[k]["label"]: k for k in METHOD_ORDER}
 _STYLE_LABELS = list(_NCO_STYLES.keys())
 
 
+def _num(value) -> Optional[float]:
+    """A finite float, or None — NaN and non-numeric both read as 'no value'.
+
+    The allocator now emits NaN wherever a figure is genuinely undefined (a
+    holding with no covariance estimate, a book with no estimable covariance at
+    all). Formatting those straight into an f-string prints "nan%", which reads
+    as a broken number rather than an absent one, so every display path funnels
+    through here and renders an em dash instead.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
 def _style_spec(ctx_or_method) -> dict:
     """Registry record for a run context, a method code, or a style label."""
     if isinstance(ctx_or_method, dict):
@@ -392,13 +408,23 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
         gap = rc_pct - w_pct if pd.notna(rc_pct) else float("nan")
         # Green = carries LESS variance than capital (what the allocator wants),
         # red = more. The colour follows the outcome, not the sign of the number.
+        # A holding with no covariance estimate has no outcome to colour.
         gap_cls = (
-            "risk-under" if gap < -0.5
+            "risk-none" if pd.isna(gap)
+            else "risk-under" if gap < -0.5
             else ("risk-over" if gap > 0.5 else "risk-balanced")
         )
         vol = float(r["volatility"]) * 100 if pd.notna(r["volatility"]) else float("nan")
         indep = 1.0 - abs(float(r["corr_to_book"])) if pd.notna(r["corr_to_book"]) else float("nan")
-        cl = int(r["cluster"]) if pd.notna(r["cluster"]) else 0
+        # Equal Weight can hold a name with too little history for a covariance
+        # estimate — it needs none to size it. Those cells render as em dashes
+        # rather than as "nan%" or a defaulted cluster 0: an absent measurement
+        # must not read as a measured zero.
+        cl_txt = f"C{int(r['cluster'])}" if pd.notna(r["cluster"]) else "&mdash;"
+        rc_txt = f"{rc_pct:.2f}%" if pd.notna(rc_pct) else "&mdash;"
+        gap_txt = f"{gap:+.2f}" if pd.notna(gap) else "&mdash;"
+        vol_txt = f"{vol:.1f}%" if pd.notna(vol) else "&mdash;"
+        indep_txt = f"{indep:.2f}" if pd.notna(indep) else "&mdash;"
         rows.append(
             "<tr>"
             f'<td class="col-symbol symbol">{sym}</td>'
@@ -406,11 +432,11 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
             f'<td class="col-price numeric currency">&#8377;{float(r["price"]):,.2f}</td>'
             f'<td class="col-weight numeric">{w_pct:.2f}%</td>'
             f'<td class="col-value numeric currency">&#8377;{float(r["value"]):,.0f}</td>'
-            f'<td class="col-cluster numeric">C{cl}</td>'
-            f'<td class="col-risk numeric">{rc_pct:.2f}%</td>'
-            f'<td class="col-gap numeric {gap_cls}">{gap:+.2f}</td>'
-            f'<td class="col-vol numeric">{vol:.1f}%</td>'
-            f'<td class="col-indep numeric">{indep:.2f}</td>'
+            f'<td class="col-cluster numeric">{cl_txt}</td>'
+            f'<td class="col-risk numeric">{rc_txt}</td>'
+            f'<td class="col-gap numeric {gap_cls}">{gap_txt}</td>'
+            f'<td class="col-vol numeric">{vol_txt}</td>'
+            f'<td class="col-indep numeric">{indep_txt}</td>'
             "</tr>"
         )
 
@@ -452,6 +478,9 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
         ".portfolio-table td.risk-under{color:#2DD4A8;}"
         ".portfolio-table td.risk-over{color:#E8555A;}"
         ".portfolio-table td.risk-balanced{color:#8B7E6A;}"
+        # No estimate is not a balanced outcome — mute it so it cannot be read
+        # as one.
+        ".portfolio-table td.risk-none{color:#4B5563;}"
         ".col-symbol{width:15%;}.col-units{width:9%;}.col-price{width:11%;}"
         ".col-weight{width:10%;}.col-value{width:13%;}.col-cluster{width:8%;}"
         ".col-risk{width:9%;}.col-gap{width:9%;}.col-vol{width:8%;}.col-indep{width:8%;}"
@@ -810,28 +839,45 @@ def _render_system_tab(training_window: List):
     # must not relabel a curated portfolio.
     _ctx = st.session_state.get("run_context") or {}
     _pf = st.session_state.get("portfolio")
-    _at = _pf.attrs if _pf is not None and hasattr(_pf, "attrs") else {}
+    _at: Dict[Any, Any] = _pf.attrs if _pf is not None and hasattr(_pf, "attrs") else {}
     _style = _ctx.get("investment_style", "—")
     _spec = _style_spec(_ctx)
-    _max_eff = _at.get("max_pos_pct_eff", st.session_state.max_pos_pct)
+    _max_eff_at = _at.get("max_pos_pct_eff")
+    _max_eff = float(_max_eff_at if _max_eff_at is not None
+                     else st.session_state.max_pos_pct)
     _max_relaxed = abs(_max_eff - st.session_state.max_pos_pct) > 1e-9
-    _disp = _at.get("nco_rc_dispersion")
-    _solved = _at.get("nco_rc_dispersion_solved")
+    _disp = _num(_at.get("nco_rc_dispersion"))
+    _solved = _num(_at.get("nco_rc_dispersion_solved"))
+    _conc = _num(_at.get("nco_rc_concentration"))
+    _vol = _num(_at.get("nco_port_vol_ann"))
+    # Two universes now, and the readout has to keep them apart: what the
+    # allocator SPREAD CAPITAL over, and what the risk numbers were ESTIMATED
+    # on. They diverge only for a style that needs no covariance (Equal Weight),
+    # which is precisely the case where reporting one as the other would be a
+    # lie about which names were considered. See nco.compute_nco_portfolio.
+    _needs_cov = bool(_at.get("nco_needs_covariance", True))
+    _cov_ok = bool(_at.get("nco_cov_estimable", True))
+    _n_alloc = int(_at.get("nco_universe", 0) or 0)
+    _n_est = int(_at.get("nco_estimation_universe", _n_alloc) or 0)
+    _diag_excl = _at.get("nco_diagnostic_excluded") or {}
+    _rc_cov = _num(_at.get("nco_rc_coverage"))
+    _uncovered = int(_at.get("nco_positions_uncovered", 0) or 0)
     details = {
         "Version": VERSION,
         "Portfolio Style": _style,
         "Curation Method": f"{_spec['label']} ({_spec['family']})",
         "Weight Formula": _spec["formula"],
-        "Risk Clusters": f"{_at.get('nco_clusters', '—')} "
-                         f"(silhouette {_at.get('nco_silhouette', 0):.2f})"
-                         + ("" if _spec["uses_clusters"] else " — diagnostic only"),
+        "Risk Clusters": ("—" if not _cov_ok else
+                          f"{_at.get('nco_clusters', '—')} "
+                          f"(silhouette {_num(_at.get('nco_silhouette')) or 0:.2f})"
+                          + ("" if _spec["uses_clusters"] else " — diagnostic only")),
         "Risk Balance": (
             f"dispersion {_disp:.3f}"
             + (f" (solved {_solved:.3f})" if _solved is not None
                and _spec["rc_target"] == "equal" else "")
             + (" · target 0.000" if _spec["rc_target"] == "equal" else " · not targeted")
             if _disp is not None else "—"),
-        "Risk Concentration": f"{_at.get('nco_rc_concentration', 0):.2f}x equal share",
+        "Risk Concentration": (f"{_conc:.2f}x equal share" if _conc is not None else "—"),
         "Positions": (
             f"{_at.get('nco_positions_delivered', 0)} of "
             f"{_at.get('nco_positions_requested', '-')} requested"
@@ -841,19 +887,48 @@ def _render_system_tab(training_window: List):
                        if _at.get("nco_short_cause") == "universe"
                        else "allocator zeroed names") + ")")),
         "Universe": (
-            f"{_at.get('nco_universe', 0)} eligible"
+            f"{_n_alloc} eligible"
             + (f" of {_at['nco_universe_requested']} in universe"
                if _at.get("nco_universe_requested") else "")
             + (f" · {len(_at.get('nco_universe_excluded') or {})} excluded"
-               f" (<{_at.get('nco_coverage_required', 0.8):.0%} history)"
-               if _at.get("nco_universe_excluded") else "")),
+               f" (<{_num(_at.get('nco_coverage_required')) or 0.8:.0%} history)"
+               if _at.get("nco_universe_excluded") else
+               " · nothing excluded (1/N needs no estimate)" if not _needs_cov else "")),
+        "Risk Estimation": (
+            f"{_n_est} of {_n_alloc} names"
+            + (f" · {len(_diag_excl)} below "
+               f"{_num(_at.get('nco_coverage_required')) or 0.8:.0%} history"
+               if _diag_excl else "")
+            + (f" · covers {_rc_cov:.0%} of book weight"
+               if _rc_cov is not None and _rc_cov < 0.999 else "")),
         "Estimation Window": f"{_at.get('nco_obs', 0)} daily observations",
-        "Ex-ante Volatility": f"{_at.get('nco_port_vol_ann', 0):.2%}",
+        "Ex-ante Volatility": (f"{_vol:.2%}" if _vol is not None else "—")
+                              + (f" (over {_rc_cov:.0%} of book weight)"
+                                 if _vol is not None and _rc_cov is not None
+                                 and _rc_cov < 0.999 else ""),
         "Max Position": f"{_max_eff*100:.1f}%" + (" (relaxed)" if _max_relaxed else ""),
         "Data Source": "yfinance (NSE)",
         "Lookback Period": f"{len(training_window)} days",
     }
     render_kv_table(details)
+    if _uncovered:
+        # Holding a name the covariance cannot see is correct for 1/N and a
+        # contradiction for anything else, so say which one this is rather than
+        # leaving a reader to infer it from blank cells in the holdings table.
+        st.caption(
+            f"{_uncovered} holding(s) have less than "
+            f"{_num(_at.get('nco_coverage_required')) or 0.8:.0%} of the estimation window "
+            f"and carry no covariance estimate. {_spec['label']} does not need one — it "
+            "sizes them identically to everything else — but every risk figure above, and "
+            "every risk column in the holdings table, is computed WITHOUT them"
+            + (f", over {_rc_cov:.0%} of book weight." if _rc_cov is not None else ".")
+        )
+    if not _cov_ok:
+        st.caption(
+            "No covariance was estimable for this window, so the cluster, risk and "
+            f"correlation diagnostics are unavailable. The book itself is unaffected: "
+            f"{_spec['label']} does not read them."
+        )
     if _max_relaxed:
         st.caption(
             f"Cap relaxed from the nominal "
@@ -887,7 +962,9 @@ def _render_system_tab(training_window: List):
                         'Holdings are grouped by <code>d = sqrt(0.5(1 - &rho;))</code> correlation '
                         'distance using Ward linkage, with the cluster count chosen by silhouette '
                         'score. Typically resolves to ~3 groups &mdash; matching the eigenvalue '
-                        'participation ratio of the same matrix.'
+                        'participation ratio of the same matrix. Computed over the names carrying '
+                        'at least 80% of the estimation window: a shorter-lived holding is sized, '
+                        'but has no covariance to be clustered by.'
                     '</div>'
                 '</div>'
 
@@ -897,8 +974,11 @@ def _render_system_tab(training_window: List):
                         + {
                             "EQUAL": ('Equal weight: every selected holding receives an identical '
                                       '<code>1/N</code> share, ignoring the covariance entirely. '
-                                      'Shown alongside the cluster structure so the risk it leaves '
-                                      'unbalanced is visible.'),
+                                      'Because it estimates nothing, it is also not bound by the '
+                                      'covariance eligibility rule &mdash; every priced symbol is '
+                                      'eligible, including one too recently listed for the other '
+                                      'styles to hold. Shown alongside the cluster structure so the '
+                                      'risk it leaves unbalanced is visible.'),
                             "ERC": ('Equal Risk Contribution: weights are solved by cyclical '
                                     'coordinate descent so that <code>w<sub>i</sub> &times; '
                                     '(&Sigma;w)<sub>i</sub></code> is identical for every holding '
@@ -957,7 +1037,7 @@ def _sync_broker_json(json_data, quantity_map: Dict[str, int]) -> Tuple[list, in
         try:
             symbol = item.get("instrument", {}).get("tradingsymbol")
             if symbol and symbol in quantity_map and "params" in item:
-                qty = int(quantity_map[symbol])
+                qty = quantity_map[symbol]
                 if qty > 0:
                     item["params"]["quantity"] = qty
                     updated += 1
@@ -1012,7 +1092,8 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
     # Process uploaded templates once, up front, so both columns read the same
     # deterministic result set (status card, results table, download buttons).
     json_files = st.session_state.get("broker_sync_json_uploader")
-    results = []  # (fname, payload_or_None, updated_count, skipped_zero_count, error_or_None)
+    # (fname, payload_or_None, updated_count, skipped_zero_count, error_or_None)
+    results: List[Tuple[str, Optional[str], int, int, Optional[str]]] = []
     if json_files:
         for j_file in json_files:
             try:
@@ -1146,7 +1227,7 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
             )
 
             for fname, payload, count, skipped_zero, err in results:
-                if err is None:
+                if payload is not None:
                     st.download_button(
                         label=f"Download updated {fname}",
                         data=payload,
@@ -1301,11 +1382,15 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     # ── Equal-weight shadow book ───────────────────────────────────────────────
     # A third reference line on HRP runs. The benchmark answers "did the book
     # beat the market?"; this answers the narrower and more actionable question
-    # "did the ALLOCATOR earn its complexity?" — the same holdings, same anchor,
-    # same capital, split 1/N instead of by cluster variance. The shadow units
-    # below are exactly what an Equal Weight run of this scope would have
-    # produced, integer-lot flooring included, so it is a real alternative book
-    # rather than an idealized fractional one.
+    # "did the ALLOCATOR earn its complexity?" — THIS book's holdings, same
+    # anchor, same capital, split 1/N instead of by cluster variance. Integer-lot
+    # flooring included, so it is a real alternative book rather than an
+    # idealized fractional one.
+    #
+    # It isolates the WEIGHTING, not the style: a genuine Equal Weight run is no
+    # longer confined to the covariance-eligible names (see
+    # nco.compute_nco_portfolio), so it can select a different set. Holding the
+    # holdings fixed is what makes this a clean read on the weights.
     #
     # Suppressed on Equal Weight runs, where the trace would draw the portfolio
     # line twice.
@@ -1620,7 +1705,7 @@ def _render_landing_page():
             specs=[
                 ("Cluster", "Ward linkage on correlation distance"),
                 ("Allocate", "1/N · equal risk contribution · cluster bisection"),
-                ("Styles", " · ".join(METHOD_SPECS[k]["short"] for k in METHOD_ORDER)),
+                ("Styles", " · ".join(str(METHOD_SPECS[k]["short"]) for k in METHOD_ORDER)),
                 ("Targets", "Volatility & drawdown, not excess return"),
             ],
             card_class="portfolio",
@@ -1772,6 +1857,9 @@ def _run_analysis(
     """Execute the 2-phase analysis pipeline."""
     metrics = get_metrics()
     metrics.phases, metrics.errors, metrics.warnings = {}, [], []
+    # Cleared with the rest of the per-run state, or a cache-hit run would
+    # re-report the previous run's re-fetch as its own.
+    metrics.data_recovery = {}
     # Reset the run clock: the tracker is per-SESSION (see metrics.get_metrics),
     # so without this the summary's "Total Duration" reports time since the
     # session's first run, not this run's wall time.
@@ -1874,6 +1962,21 @@ def _run_analysis(
         # carries the same checkpoints the progress bar showed.
         log.section("Data & Regime", phase="PHASE 1")
         log.item("Historical Panel", f"{len(all_hist)} trading days · {len(symbols_list)} symbols")
+        # What the batch download missed, and what the per-symbol second pass got
+        # back (backdata._recover_missing_symbols). Silence here means the batch
+        # returned everything; it is not the same as no second pass having run,
+        # which is why the failures are named rather than counted.
+        _rec = getattr(metrics, "data_recovery", None) or {}
+        if _rec.get("missing"):
+            log.item("Re-fetch",
+                     f"{len(_rec.get('recovered') or [])} of {len(_rec['missing'])} "
+                     f"missing symbol(s) recovered"
+                     + (f" · skipped ({_rec['skipped_reason']})"
+                        if _rec.get("skipped_reason") else ""))
+            if _rec.get("recovered"):
+                log.item("  recovered", ", ".join(_rec["recovered"]))
+            if _rec.get("failed"):
+                log.item("  unavailable", ", ".join(_rec["failed"]))
         log.item("Market Regime", f"{regime_name.replace('_', ' ')} · {confidence:.0%} confidence")
 
         progress_bar(
@@ -1954,14 +2057,23 @@ def _run_analysis(
                 _book = pd.DataFrame()
 
             if _book.empty:
+                # Equal Weight cannot fail on a covariance it never reads, so it
+                # must not be told it did: the only way it comes back empty is
+                # that nothing in the universe had a usable price.
+                _needs_cov = bool(_spec.get("needs_covariance", True))
                 st.error(
                     f"{investment_style} could not build a portfolio — the return "
                     "covariance was not estimable (too few overlapping observations "
                     "for this universe and date). Try an earlier analysis date, a "
                     "larger universe, or a later analysis date."
+                    if _needs_cov else
+                    f"{investment_style} could not build a portfolio — no symbol in this "
+                    "universe returned a usable price for the selected date. Check the "
+                    "universe selection, or try another date."
                 )
                 metrics.end_phase("curation", success=False,
-                                  error_msg="Covariance not estimable")
+                                  error_msg="Covariance not estimable" if _needs_cov
+                                  else "No priced symbols")
                 st.stop()
 
             st.session_state.portfolio = _book
@@ -1973,7 +2085,7 @@ def _run_analysis(
                 "regime_name": regime_name,
                 "anchor_date": selected_date_display,
                 "investment_style": investment_style,
-                "capital": float(capital),
+                "capital": capital,
                 "curation": _method,
             }
 
@@ -1981,39 +2093,57 @@ def _run_analysis(
             log.item("Method", f"{_spec['label']} [{_spec['short']}] · {_spec['family']}")
             log.item("Weight formula", _spec["formula"])
             log.item("Estimation", f"{_book.attrs.get('nco_obs', 0)} daily observations · "
-                                   f"{_book.attrs.get('nco_universe', 0)} symbols")
-            # Name every symbol the coverage rule dropped. A book built on 28 of
+                                   f"{_book.attrs.get('nco_estimation_universe', 0)} symbols")
+            # Name every symbol the coverage rule touched. A book built on 28 of
             # 30 ETFs is correct when two of them listed this year, but it must
-            # never be left to the reader to work that out.
-            _excl = _book.attrs.get("nco_universe_excluded") or {}
+            # never be left to the reader to work that out — and under Equal
+            # Weight those two names are HELD with no risk numbers, which is a
+            # different fact and has to read differently.
+            _excl = _book.attrs.get("nco_diagnostic_excluded") or {}
+            _excl_from_book = bool(_book.attrs.get("nco_universe_excluded"))
             if _excl:
                 log.item("Universe",
-                         f"{_book.attrs.get('nco_universe', 0)} of "
-                         f"{_book.attrs.get('nco_universe_requested', 0)} eligible · "
-                         f"{len(_excl)} excluded below "
-                         f"{_book.attrs.get('nco_coverage_required', 0.8):.0%} history")
+                         f"{_book.attrs.get('nco_universe', 0)} allocated · "
+                         f"{_book.attrs.get('nco_estimation_universe', 0)} with a covariance "
+                         f"estimate · {len(_excl)} below "
+                         f"{_book.attrs.get('nco_coverage_required', 0.8):.0%} history "
+                         + ("(excluded from the book)" if _excl_from_book
+                            else "(held, no risk diagnostics)"))
                 for _sym, _d in sorted(_excl.items(), key=lambda kv: kv[1]["coverage"]):
-                    log.item(f"  excluded {_sym}",
+                    log.item(f"  {'excluded' if _excl_from_book else 'unestimated'} {_sym}",
                              f"{_d['obs']}/{_d['window']} obs ({_d['coverage']:.0%})")
-            log.item("Clustering", f"{_book.attrs.get('nco_clusters', 0)} clusters "
-                                   f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})"
-                                   + ("" if _spec["uses_clusters"] else " · diagnostic only"))
+            log.item("Clustering",
+                     (f"{_book.attrs.get('nco_clusters', 0)} clusters "
+                      f"(silhouette {_book.attrs.get('nco_silhouette', 0):.3f})"
+                      if _book.attrs.get("nco_cov_estimable", True)
+                      else "not estimable for this window")
+                     + ("" if _spec["uses_clusters"] else " · diagnostic only"))
             # Risk balance is the number that says whether the method achieved
             # what it targets. Dispersion is the coefficient of variation of the
             # risk contributions: 0.00 is perfect equal-risk.
-            _disp = _book.attrs.get("nco_rc_dispersion", float("nan"))
-            _conc = _book.attrs.get("nco_rc_concentration", float("nan"))
-            log.item("Risk balance", f"dispersion {_disp:.3f} "
-                                     f"({'target 0.00' if _spec['rc_target'] == 'equal' else 'not targeted'})"
-                                     f" · concentration {_conc:.2f}x equal share")
+            # "—" rather than "nan": a book whose holdings have no covariance
+            # estimate has no dispersion, which is a different statement from a
+            # dispersion of zero.
+            _disp = _num(_book.attrs.get("nco_rc_dispersion"))
+            _conc = _num(_book.attrs.get("nco_rc_concentration"))
+            log.item("Risk balance",
+                     (f"dispersion {_disp:.3f} " if _disp is not None else "dispersion — ")
+                     + f"({'target 0.00' if _spec['rc_target'] == 'equal' else 'not targeted'})"
+                     + (f" · concentration {_conc:.2f}x equal share"
+                        if _conc is not None else " · concentration —"))
             if _spec["uses_momentum"]:
                 log.item("Momentum tilt",
                          f"{_book.attrs.get('nco_momentum_names', 0)} names scored "
                          f"({MOMENTUM_LOOKBACK}-{MOMENTUM_SKIP} window) · "
                          f"lambda {_book.attrs.get('nco_momentum_lambda', 0):.2f}"
                          + ("" if _book.attrs.get("nco_momentum_applied") else " · NOT APPLIED"))
+            _pvol = _num(_book.attrs.get("nco_port_vol_ann"))
+            _pcov = _num(_book.attrs.get("nco_rc_coverage"))
             log.item("Positions", f"{len(_book)} curated · ex-ante vol "
-                                  f"{_book.attrs.get('nco_port_vol_ann', 0):.2%}")
+                                  + (f"{_pvol:.2%}" if _pvol is not None else "—")
+                                  + (f" (over {_pcov:.0%} of book weight)"
+                                     if _pvol is not None and _pcov is not None
+                                     and _pcov < 0.999 else ""))
             metrics.end_phase("curation", success=True)
             metrics.symbols_count = _book.attrs.get("nco_universe", len(_book))
             metrics.strategies_count = 0
@@ -2027,9 +2157,9 @@ def _run_analysis(
                 "Weight Formula": _spec["formula"],
                 "Clusters": _book.attrs.get("nco_clusters", 0),
                 "Positions Selected": len(_book),
-                "Risk Dispersion": f"{_book.attrs.get('nco_rc_dispersion', 0):.3f}",
-                "Risk Concentration": f"{_book.attrs.get('nco_rc_concentration', 0):.2f}x",
-                "Ex-ante Vol": f"{_book.attrs.get('nco_port_vol_ann', 0):.2%}",
+                "Risk Dispersion": f"{_disp:.3f}" if _disp is not None else "—",
+                "Risk Concentration": f"{_conc:.2f}x" if _conc is not None else "—",
+                "Ex-ante Vol": f"{_pvol:.2%}" if _pvol is not None else "—",
                 "Status": "SUCCESS",
             })
             metrics.print_summary(log)

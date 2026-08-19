@@ -67,7 +67,7 @@ Author: @thebullishvalue
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -360,6 +360,13 @@ def hrp_weights(cov: np.ndarray, corr: np.ndarray) -> np.ndarray:
 #               the risk charts must be scored against. "equal" means the method
 #               targets identical risk shares; "none" means it does not manage
 #               risk contribution at all.
+# `needs_covariance`  whether the WEIGHTS are computed from the covariance. This
+#               is an eligibility rule, not a description: a style that reads the
+#               covariance can only hold names that have one, so it is confined
+#               to the estimation universe (>= MIN_COVERAGE of the window). Equal
+#               weight reads nothing, so it allocates over every priced symbol —
+#               excluding a recently listed name from a 1/N book would be a rule
+#               with no statistic behind it. See compute_nco_portfolio.
 # `evidence`    one measured sentence, shown in the UI. No claim without a number.
 
 METHOD_SPECS = {
@@ -372,6 +379,7 @@ METHOD_SPECS = {
         "uses_clusters": False,
         "uses_momentum": False,
         "rc_target": "none",
+        "needs_covariance": False,
         "evidence": ("The default because nothing beat it. Across 36 candidate allocators "
                      "on three universes, no method delivered a reproducible return "
                      "improvement: ERC gave up 0.51%/yr on Nifty 50 and 1.48% on Dow 30. "
@@ -387,6 +395,7 @@ METHOD_SPECS = {
         "uses_clusters": False,
         "uses_momentum": False,
         "rc_target": "equal",
+        "needs_covariance": True,
         "evidence": ("The preferred risk-reduction style: it beats HRP on the any-date hit "
                      "rate in 6 of 6 cells across both stock universes while trading about "
                      "FIVE TIMES less (0.26x/yr vs 1.31x on Nifty 50). It does NOT beat "
@@ -403,6 +412,7 @@ METHOD_SPECS = {
         "uses_clusters": True,
         "uses_momentum": False,
         "rc_target": "cluster",
+        "needs_covariance": True,
         "evidence": ("Cuts volatility and drawdown against equal weight but loses to it on "
                      "return in all three universes (-1.08% Nifty, -2.94% Dow) and won 0 of "
                      "115 five-year SIP streams. ERC does the same job with a fifth of the "
@@ -427,6 +437,7 @@ METHOD_SPECS = {
         "uses_clusters": False,
         "uses_momentum": True,
         "rc_target": "equal",
+        "needs_covariance": True,
         "evidence": ("NOT SHIPPED. Against a corrected ERC base it beat equal weight in 0 "
                      "of 115 five-year SIP streams and by +0.19%/yr on Nifty lump-sum "
                      "(alpha t = 1.68). The earlier 98-100% SIP hit rate was an artifact "
@@ -502,7 +513,7 @@ def _apply_cap(w: np.ndarray, cap: float) -> np.ndarray:
     return w
 
 
-def build_returns_matrix(history: List[Tuple[object, pd.DataFrame]],
+def build_returns_matrix(history: Sequence[Tuple[object, pd.DataFrame]],
                          symbols: Optional[List[str]] = None,
                          lookback: int = 252,
                          ) -> pd.DataFrame:
@@ -551,7 +562,7 @@ def build_returns_matrix(history: List[Tuple[object, pd.DataFrame]],
     return out
 
 
-def build_price_matrix(history: List[Tuple[object, pd.DataFrame]],
+def build_price_matrix(history: Sequence[Tuple[object, pd.DataFrame]],
                        symbols: Optional[List[str]] = None) -> pd.DataFrame:
     """Wide price panel from the same (date, snapshot) history.
 
@@ -574,7 +585,16 @@ def build_price_matrix(history: List[Tuple[object, pd.DataFrame]],
     return px
 
 
-def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
+def _is_priced(price: object) -> bool:
+    """A usable, positive, finite price — the only input equal weight requires."""
+    try:
+        p = float(price)          # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(p)) and p > 0
+
+
+def compute_nco_portfolio(history: Sequence[Tuple[object, pd.DataFrame]],
                           prices: Dict[str, float],
                           capital: float,
                           num_positions: int,
@@ -588,6 +608,15 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     over every eligible symbol, the top `num_positions` by weight are kept, and
     those are renormalized. No return forecast is involved at any stage.
 
+    ELIGIBILITY IS PER-STYLE, because it is a property of the weight formula.
+    Styles that read the covariance (`needs_covariance` in METHOD_SPECS) can only
+    hold names that HAVE one, so they are confined to the estimation universe —
+    symbols with at least MIN_COVERAGE of the window. Equal weight reads nothing,
+    so it allocates over every priced symbol; a coverage rule protects a
+    covariance, and 1/N has none to protect. The risk diagnostics are always
+    computed on the estimation universe, and `nco_rc_coverage` records the share
+    of book weight they describe (1.0 for every covariance-driven style).
+
     A per-position cap is applied (relaxed to 1/n when n makes it infeasible),
     but NO floor: a floor would fight the method. The entire point is that a
     redundant asset — one whose risk is already carried by a cluster peer —
@@ -597,37 +626,88 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     Returns a DataFrame with symbol / price / weightage_pct / units / value plus
     `cluster` and `risk_contribution`, and carries `.attrs` describing the fit
     (`nco_method`, `nco_clusters`, `nco_silhouette`, `nco_obs`, `max_pos_pct_eff`).
-    Returns an empty frame when the covariance cannot be trusted.
+    Holdings with no covariance estimate carry NaN in every risk column rather
+    than a fabricated number. Returns an empty frame when a covariance-driven
+    style has no covariance it can trust.
     """
     empty = pd.DataFrame()
     if not prices or capital <= 0 or num_positions <= 0:
         return empty
 
-    rets = build_returns_matrix(history, symbols=list(prices.keys()), lookback=lookback)
-    if rets.empty:
-        return empty
-    n_assets = rets.shape[1]
-    if len(rets) < MIN_OBS or len(rets) < MIN_OBS_PER_ASSET * 1.0:
-        return empty
-    # Guard the p >> n regime explicitly: a sample covariance estimated from
-    # fewer observations than roughly 4x the asset count is singular or close to
-    # it, and clustering on it produces arbitrary groupings.
-    if len(rets) < MIN_OBS_PER_ASSET * n_assets / 4.0 or len(rets) < MIN_OBS:
-        return empty
-
-    names = list(rets.columns)
-    R = rets.to_numpy(dtype=float)
-    cov = np.cov(R, rowvar=False)
-    corr = np.nan_to_num(np.corrcoef(R, rowvar=False), nan=0.0)
-
-    # Every style is computed HERE rather than short-circuited earlier, so all of
-    # them travel the identical pipeline — same eligibility filter, same
-    # clustering diagnostics, same risk decomposition. That makes the styles
-    # genuinely comparable on screen: any difference the user sees is the
-    # allocator, not a different data path.
     _m = str(method).upper()
     _spec = method_spec(_m)
-    mom = pd.Series(np.nan, index=names)
+    # Does this style's WEIGHT FORMULA read the covariance? The answer decides
+    # which names it is allowed to hold — see the eligibility split below.
+    _needs_cov = bool(_spec.get("needs_covariance", True))
+
+    rets = build_returns_matrix(history, symbols=list(prices.keys()), lookback=lookback)
+    est_names = list(rets.columns)
+    n_est = len(est_names)
+    # Is the covariance trustworthy? Enough observations outright, and enough per
+    # asset: below roughly 4x the asset count the sample covariance is singular
+    # or close to it, and clustering on it produces arbitrary groupings.
+    cov_ok = (
+        not rets.empty
+        and n_est >= 2
+        and len(rets) >= MIN_OBS
+        and len(rets) >= MIN_OBS_PER_ASSET * n_est / 4.0
+    )
+    # A style that allocates FROM the covariance cannot proceed without one. A
+    # style that does not, can — and must: refusing to build an equal-weight book
+    # because a matrix it never looks at was not estimable is a defect dressed as
+    # a safeguard.
+    if _needs_cov and not cov_ok:
+        return empty
+
+    # ── Two universes, not one ────────────────────────────────────────────────
+    # ESTIMATION universe: the names carrying at least MIN_COVERAGE of the
+    # window, i.e. the names that HAVE a covariance estimate. Every risk number
+    # this module reports — cluster, risk contribution, volatility, correlation
+    # to the book, ex-ante volatility — is computed over these and only these.
+    #
+    # ALLOCATION universe: the names capital is actually spread across. For a
+    # covariance-driven style the two sets are identical, because a weight for a
+    # name with no estimate is undefined. Equal weight estimates nothing, so its
+    # allocation universe is every priced symbol: the coverage rule exists to
+    # protect a covariance, and 1/N has no covariance to protect. Excluding a
+    # recently listed ETF from a 1/N book was a rule with no statistic behind it.
+    #
+    # The estimation set is still computed on an equal-weight run — the risk
+    # diagnostics are the reason to look at the book — but it no longer decides
+    # what the book holds.
+    if _needs_cov:
+        alloc_names = list(est_names)
+    else:
+        alloc_names = [s for s in prices if _is_priced(prices.get(s))]
+    if not alloc_names:
+        return empty
+
+    est_pos = {s: i for i, s in enumerate(est_names)}
+
+    if cov_ok:
+        R = rets.to_numpy(dtype=float)
+        cov = np.cov(R, rowvar=False)
+        corr = np.nan_to_num(np.corrcoef(R, rowvar=False), nan=0.0)
+        # Clustered ONCE and reused for both the count/silhouette report and the
+        # per-holding labels. Two separate calls cost twice as much for the same
+        # answer, and would silently disagree if the routine ever stopped being
+        # deterministic.
+        labels, k, sil = cluster_assets(corr)
+        lab_by_name = {s: int(labels[i]) for i, s in enumerate(est_names)}
+    else:
+        R = np.zeros((0, 0))
+        cov = None
+        corr = None
+        labels, k, sil = np.zeros(0, dtype=int), 0, 0.0
+        lab_by_name = {}
+
+    # Every style is computed HERE rather than short-circuited earlier, so all of
+    # them travel the identical pipeline — same selection, same position cap,
+    # same risk decomposition. That makes the styles genuinely comparable on
+    # screen: any difference the user sees is the allocator. The one thing they
+    # do NOT share is the eligibility rule above, which is a property of the
+    # weight formula rather than a stylistic choice.
+    mom = pd.Series(np.nan, index=alloc_names)
     # The covariance the ALLOCATOR optimised against. The convergence diagnostic
     # below must be measured on this matrix, not on the sample covariance used
     # for reporting: ERC solves on the shrunk estimate, so scoring its solution
@@ -637,16 +717,22 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     solver_cov = cov
 
     if _m == "EQUAL":
-        w = np.full(len(names), 1.0 / len(names))
+        w = np.full(len(alloc_names), 1.0 / len(alloc_names))
+    elif cov is None or corr is None:
+        # Unreachable as the registry stands: every covariance-driven style
+        # returned above when the covariance was not estimable. Kept as a hard
+        # guard so a style added later without `needs_covariance` set cannot
+        # silently dereference a matrix that was never built.
+        return empty
     elif _m == "HRP":
         w = hrp_weights(cov, corr)
     elif _m in ("ERC", "ERC_MOM"):
         solver_cov = ledoit_wolf(R)
         w = erc_weights(solver_cov)
         if _m == "ERC_MOM":
-            px_panel = build_price_matrix(history, symbols=names)
+            px_panel = build_price_matrix(history, symbols=alloc_names)
             mom = momentum_scores(px_panel, MOMENTUM_LOOKBACK, MOMENTUM_SKIP)
-            mom = mom.reindex(names)
+            mom = mom.reindex(alloc_names)
             if mom.notna().sum() >= 2:
                 w = apply_momentum_tilt(w, mom, MOMENTUM_LAMBDA)
             # Too few names carry a full 12-1 window to rank meaningfully; the
@@ -654,24 +740,34 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
             # caller can see this happened via the `nco_momentum_names` attr.
     else:
         w = hrp_weights(cov, corr)
-    _, k, sil = cluster_assets(corr)
 
     w = np.nan_to_num(w, nan=0.0)
     if w.sum() <= 1e-12:
         return empty
     w = w / w.sum()
 
-    # Risk balance as SOLVED, over the full eligible set and before any
-    # selection or cap. Kept separately from the realised figure below because
-    # the two answer different questions: this one says whether the optimiser
-    # converged, the realised one says what the book the user actually holds
-    # looks like after top-N selection and the position cap have moved it.
-    # Conflating them makes a correct ERC solve look like a failed one.
-    _rc_solved = risk_contributions(w, solver_cov)
-    _rc_solved_disp = (float(np.std(_rc_solved) / np.mean(_rc_solved))
-                       if np.mean(_rc_solved) > 1e-18 else 0.0)
+    # Risk balance as SOLVED, over the full eligible set and before any selection
+    # or cap. Kept separately from the realised figure below because the two
+    # answer different questions: this one says whether the optimiser converged,
+    # the realised one says what the book the user actually holds looks like
+    # after top-N selection and the position cap have moved it. Conflating them
+    # makes a correct ERC solve look like a failed one.
+    #
+    # Undefined for a style that solves nothing: 1/N has no solution to converge
+    # to, and its weight vector does not even span the estimation universe.
+    if _needs_cov and cov_ok and solver_cov is not None:
+        _rc_solved = risk_contributions(w, solver_cov)
+        _rc_solved_disp = (float(np.std(_rc_solved) / np.mean(_rc_solved))
+                           if np.mean(_rc_solved) > 1e-18 else 0.0)
+    else:
+        _rc_solved_disp = float("nan")
 
-    ser = pd.Series(w, index=names).sort_values(ascending=False)
+    # Sorted by weight, and STABLY. Equal weight makes every entry a tie, so an
+    # unstable sort would leave quicksort's partition order to decide which N of
+    # them the book holds — arbitrary, and liable to change under an unrelated
+    # pandas upgrade. A stable sort keeps ties in universe order, which for an
+    # index universe is its published constituent order.
+    ser = pd.Series(w, index=alloc_names).sort_values(ascending=False, kind="stable")
     # Drop names the allocator zeroed out BEFORE selecting. Corner-solution
     # optimisers (minimum variance, maximum diversification) put most names at
     # exactly 0, and carrying those into the top-N selection would fill the book
@@ -694,43 +790,68 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     n = len(wv)
     cap_eff = max(max_pos_pct, 1.0 / n)
 
-    labels, _, _ = cluster_assets(corr)
-    lab_by_name = dict(zip(names, labels))
-    idx = [names.index(s) for s in chosen.index]
-    sub_cov = cov[np.ix_(idx, idx)]
-    port_var = float(wv @ sub_cov @ wv)
-    # Marginal risk contribution, normalised to sum to 1 — shows whether the
-    # clustering actually balanced risk or merely balanced capital.
-    mrc = sub_cov @ wv
-    rc = wv * mrc
-    rc = rc / rc.sum() if abs(rc.sum()) > 1e-18 else np.full(n, 1.0 / n)
+    sel = list(chosen.index)
+    # Which HOLDINGS carry a covariance estimate. Identical to `sel` for every
+    # covariance-driven style. On an equal-weight book it can be a strict subset,
+    # and the diagnostics below are then reported over that subset with the share
+    # of book weight they cover recorded in `nco_rc_coverage` — rather than
+    # quietly implying they describe the whole book.
+    covered = np.array([bool(cov_ok and s in est_pos) for s in sel])
 
-    # Per-asset diagnostics for the risk heatmap: annualized volatility, and
-    # each holding's correlation to the finished book (how much it moves WITH
-    # the portfolio, i.e. how little it diversifies).
-    ann_vol = np.sqrt(np.diag(sub_cov)) * np.sqrt(252)
-    book_ret = R[:, idx] @ wv
-    corr_to_book = np.array([
-        float(np.corrcoef(R[:, j], book_ret)[0, 1]) if np.std(R[:, j]) > 1e-12 else 0.0
-        for j in idx
-    ])
+    rc = np.full(n, np.nan)
+    ann_vol = np.full(n, np.nan)
+    corr_to_book = np.full(n, np.nan)
+    cluster_col = np.full(n, np.nan)
+    port_var = float("nan")
+    rc_coverage = 0.0
 
-    px_arr = np.array([float(prices.get(s, np.nan)) for s in chosen.index], dtype=float)
+    if covered.any() and cov is not None:
+        cidx = [est_pos[s] for s, ok in zip(sel, covered) if ok]
+        sub_cov = cov[np.ix_(cidx, cidx)]
+        w_cov = wv[covered]
+        rc_coverage = float(w_cov.sum())
+        # Renormalised WITHIN the covered sub-book, so every figure below reads
+        # as "of the risk this book's measurable part carries". At full coverage
+        # — every style except a partially estimable equal-weight run — the
+        # renormalisation is by 1.0 and these are exactly the same numbers as
+        # before the estimation set and the allocation set were separated.
+        wc = (w_cov / w_cov.sum() if w_cov.sum() > 1e-18
+              else np.full(len(cidx), 1.0 / len(cidx)))
+        port_var = float(wc @ sub_cov @ wc)
+        # Marginal risk contribution, normalised to sum to 1 — shows whether the
+        # clustering actually balanced risk or merely balanced capital.
+        _rc = wc * (sub_cov @ wc)
+        _rc = (_rc / _rc.sum() if abs(_rc.sum()) > 1e-18
+               else np.full(len(cidx), 1.0 / len(cidx)))
+        rc[covered] = _rc
+        # Per-asset diagnostics for the risk heatmap: annualized volatility, and
+        # each holding's correlation to the finished book (how much it moves WITH
+        # the portfolio, i.e. how little it diversifies).
+        ann_vol[covered] = np.sqrt(np.diag(sub_cov)) * np.sqrt(252)
+        book_ret = R[:, cidx] @ wc
+        corr_to_book[covered] = np.nan_to_num(np.array([
+            float(np.corrcoef(R[:, j], book_ret)[0, 1]) if np.std(R[:, j]) > 1e-12 else 0.0
+            for j in cidx
+        ], dtype=float), nan=0.0)
+        cluster_col[covered] = [float(lab_by_name.get(s, 0))
+                                for s, ok in zip(sel, covered) if ok]
+
+    px_arr = np.array([float(prices.get(s, np.nan)) for s in sel], dtype=float)
     # Momentum is carried per-holding so the risk profile chart can show the
     # tilt that was actually applied, not a re-derivation of it. Methods that do
     # not use momentum emit NaN, and the chart drops the row.
-    _mom_sel = mom.reindex(chosen.index) if _spec["uses_momentum"] else pd.Series(
-        np.nan, index=chosen.index)
+    _mom_sel = mom.reindex(sel) if _spec["uses_momentum"] else pd.Series(
+        np.nan, index=sel)
     _mom_z = (rank_z(_mom_sel) if _spec["uses_momentum"] and _mom_sel.notna().sum() >= 2
-              else pd.Series(np.nan, index=chosen.index))
+              else pd.Series(np.nan, index=sel))
     out = pd.DataFrame({
-        "symbol": list(chosen.index),
+        "symbol": sel,
         "price": px_arr,
         "weightage_pct": wv * 100.0,
-        "cluster": [int(lab_by_name.get(s, 0)) for s in chosen.index],
+        "cluster": cluster_col,
         "risk_contribution": rc,
         "volatility": ann_vol,
-        "corr_to_book": np.nan_to_num(corr_to_book, nan=0.0),
+        "corr_to_book": corr_to_book,
         "momentum": _mom_sel.to_numpy(dtype=float),
         "momentum_z": _mom_z.to_numpy(dtype=float),
     })
@@ -748,11 +869,22 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     out.attrs["nco_rc_target"] = _spec["rc_target"]
     out.attrs["nco_uses_clusters"] = bool(_spec["uses_clusters"])
     out.attrs["nco_uses_momentum"] = bool(_spec["uses_momentum"])
+    out.attrs["nco_needs_covariance"] = bool(_needs_cov)
+    out.attrs["nco_cov_estimable"] = bool(cov_ok)
     out.attrs["nco_clusters"] = int(k)
     out.attrs["nco_silhouette"] = float(sil)
     out.attrs["nco_obs"] = int(len(rets))
-    out.attrs["nco_universe"] = int(n_assets)
-    out.attrs["nco_port_vol_ann"] = float(np.sqrt(max(port_var, 0.0)) * np.sqrt(252))
+    # The set the ALLOCATOR worked over, and the (possibly smaller) set the risk
+    # numbers were estimated on. They differ only when a style that needs no
+    # covariance holds a name that has none.
+    out.attrs["nco_universe"] = int(len(alloc_names))
+    out.attrs["nco_estimation_universe"] = int(n_est)
+    out.attrs["nco_port_vol_ann"] = (float(np.sqrt(max(port_var, 0.0)) * np.sqrt(252))
+                                     if np.isfinite(port_var) else float("nan"))
+    # What share of the book's weight the risk figures above actually describe.
+    # 1.0 for every covariance-driven style, by construction.
+    out.attrs["nco_rc_coverage"] = float(rc_coverage)
+    out.attrs["nco_positions_uncovered"] = int(out["risk_contribution"].isna().sum())
     out.attrs["max_pos_pct_eff"] = float(cap_eff)
     out.attrs["min_pos_pct_eff"] = 0.0
     # Risk-balance diagnostics. `rc_dispersion` is the coefficient of variation
@@ -760,21 +892,31 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     # that says whether ERC actually achieved what it targets. `rc_concentration`
     # is the heaviest holding's risk share against its equal share — the header
     # card's "Risk Concentration".
-    _rc_sel = rc[rc > 0] if (rc > 0).any() else rc
+    _rc_fin = rc[np.isfinite(rc)]
+    _rc_sel = _rc_fin[_rc_fin > 0] if (_rc_fin > 0).any() else _rc_fin
     out.attrs["nco_rc_dispersion"] = (float(np.std(_rc_sel) / np.mean(_rc_sel))
-                                      if len(_rc_sel) and np.mean(_rc_sel) > 1e-18 else 0.0)
+                                      if len(_rc_sel) and np.mean(_rc_sel) > 1e-18
+                                      else float("nan"))
     out.attrs["nco_rc_dispersion_solved"] = float(_rc_solved_disp)
-    out.attrs["nco_rc_concentration"] = float(rc.max() * n) if n else 1.0
+    out.attrs["nco_rc_concentration"] = (float(np.nanmax(rc) * len(_rc_fin))
+                                         if len(_rc_fin) else float("nan"))
     # Position-count contract: the book must hold exactly what the user asked
     # for, unless the ELIGIBLE UNIVERSE itself is smaller. `nco_positions_short`
     # separates the two causes — a short book because the universe ran out is a
     # data condition the user can act on; a short book because the allocator
     # zeroed names out is an allocator defect.
-    # Universe eligibility, carried through so the UI can say why the book was
-    # built from fewer names than the universe declares.
-    _excl = rets.attrs.get("excluded", {})
-    out.attrs["nco_universe_requested"] = int(n_assets + len(_excl))
-    out.attrs["nco_universe_excluded"] = dict(_excl)
+    #
+    # Eligibility, carried through so the UI can say why the book was built from
+    # fewer names than the universe declares. `nco_universe_excluded` is what the
+    # coverage rule kept OUT OF THE BOOK — empty for a style that excludes
+    # nothing — while `nco_diagnostic_excluded` is what it kept out of the RISK
+    # NUMBERS, which is the same set for a covariance-driven style and a
+    # strictly milder statement for equal weight.
+    _excl = dict(rets.attrs.get("excluded", {})) if not rets.empty else {}
+    out.attrs["nco_universe_requested"] = int(n_est + len(_excl) if _needs_cov
+                                              else len(alloc_names))
+    out.attrs["nco_universe_excluded"] = dict(_excl) if _needs_cov else {}
+    out.attrs["nco_diagnostic_excluded"] = dict(_excl)
     out.attrs["nco_coverage_required"] = float(rets.attrs.get("coverage_required", MIN_COVERAGE))
     out.attrs["nco_coverage_window"] = int(rets.attrs.get("coverage_window", len(rets)))
     out.attrs["nco_positions_requested"] = int(num_positions)
@@ -783,7 +925,7 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     out.attrs["nco_positions_short"] = max(0, int(num_positions) - int(len(out)))
     out.attrs["nco_short_cause"] = (
         "none" if len(out) >= num_positions
-        else "universe" if n_assets <= num_positions or n_nonzero >= num_positions
+        else "universe" if len(alloc_names) <= num_positions or n_nonzero >= num_positions
         else "allocator_zeroed")
     out.attrs["nco_momentum_names"] = int(_mom_sel.notna().sum())
     out.attrs["nco_momentum_lambda"] = (float(MOMENTUM_LAMBDA)
@@ -793,11 +935,14 @@ def compute_nco_portfolio(history: List[Tuple[object, pd.DataFrame]],
     # Full correlation matrix plus the cluster ordering, so the UI can draw the
     # quasi-diagonalized structure the allocator actually saw. Ordering by
     # cluster is what makes the block structure visible — the same reordering
-    # HRP uses internally.
-    _order = [names[i] for i in np.argsort(labels, kind="stable")]
-    out.attrs["corr_matrix"] = pd.DataFrame(corr, index=names, columns=names).loc[_order, _order]
-    out.attrs["cluster_order"] = _order
-    out.attrs["cluster_labels"] = {names[i]: int(labels[i]) for i in range(len(names))}
+    # HRP uses internally. Absent when there was no estimable covariance to
+    # draw, which the UI reads as "skip the Risk Structure section".
+    if cov_ok:
+        _order = [est_names[i] for i in np.argsort(labels, kind="stable")]
+        out.attrs["corr_matrix"] = pd.DataFrame(
+            corr, index=est_names, columns=est_names).loc[_order, _order]
+        out.attrs["cluster_order"] = _order
+        out.attrs["cluster_labels"] = dict(lab_by_name)
     return out.sort_values("weightage_pct", ascending=False).reset_index(drop=True)
 
 

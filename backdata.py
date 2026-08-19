@@ -22,9 +22,10 @@ Author: @thebullishvalue
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import time
 import warnings
 import os
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional, cast
 
 # Import circuit breaker and metrics
 from circuit_breaker import yfinance_circuit, RetryWithBackoff
@@ -376,6 +377,198 @@ INDICATOR_PERIODS = [20, 90, 200]
 MAX_INDICATOR_PERIOD = max(INDICATOR_PERIODS)
 
 
+# ── Second-pass recovery for symbols the batch download missed ────────────────
+#
+# `yf.download` over a LIST of tickers does not raise when only SOME of them
+# fail — it returns all-NaN columns for those. The RetryWithBackoff wrapped
+# around the batch call therefore never fires for the common case (two or three
+# symbols out of thirty), and those columns were dropped silently, leaving the
+# run on a quietly smaller universe. Because the panel is cached for an hour
+# (app._load_historical_data), one unlucky fetch degraded every rerun until the
+# TTL expired.
+#
+# The constants below bound a per-symbol second pass over exactly the symbols
+# that came back empty. It is deliberately NOT attempted when most of the
+# universe is missing: that is a service outage, and re-requesting 200 symbols
+# one at a time turns a fast failure into a very slow one.
+_RECOVERY_MAX_SYMBOLS = 40        # cap on single-symbol fetches per run
+_RECOVERY_FAILURE_RATIO = 0.5     # >50% of the universe missing = outage, don't retry
+_RECOVERY_ABORT_AFTER = 5         # consecutive failures that mean "stop, it's the service"
+_RECOVERY_ATTEMPTS = 2            # attempts per symbol
+_RECOVERY_DELAY = 1.0             # seconds between attempts on one symbol
+
+# Trading bars a symbol may lag the panel end before it counts as missed rather
+# than merely quiet. Shared with the forward-fill below so "recoverable gap" and
+# "gap we carry the last price across" are the same number by construction.
+_STALE_BARS = 5
+
+
+def _unfetched_symbols(close: pd.DataFrame, symbols: List[str]) -> List[str]:
+    """Symbols whose batch download returned nothing, or stopped early.
+
+    Two distinct failures share one signature here: a column that is entirely
+    NaN (nothing came back at all) and a column whose last valid bar sits more
+    than ``_STALE_BARS`` before the end of the panel (the download stopped
+    early, so every price the run reads for that symbol is stale).
+
+    A LEADING gap is deliberately NOT counted as missed. A symbol that listed
+    part-way through the window genuinely has no earlier history, and retrying
+    it every run would spend the whole recovery budget re-requesting data that
+    does not exist.
+    """
+    if close is None or close.empty:
+        return list(symbols)
+
+    missed: List[str] = []
+    n_rows = len(close.index)
+    for sym in symbols:
+        if sym not in close.columns:
+            missed.append(sym)              # yfinance omitted the column outright
+            continue
+        col = pd.to_numeric(close[sym], errors="coerce")
+        if not col.notna().any():
+            missed.append(sym)              # column present, nothing in it
+            continue
+        last = col.last_valid_index()
+        loc = int(close.index.get_indexer(pd.Index([last]))[0]) if last is not None else -1
+        if loc < 0:
+            continue
+        if n_rows - 1 - loc > _STALE_BARS:
+            missed.append(sym)
+    return missed
+
+
+def _refetch_symbol(symbol: str, start_date: datetime,
+                    end_date: datetime) -> Optional[pd.DataFrame]:
+    """Re-fetch ONE symbol through ``Ticker.history`` — a different endpoint.
+
+    Using a different endpoint is the point: when the batch quote endpoint
+    returns an empty column for a symbol it is frequently a per-request failure
+    rather than a missing instrument, and the per-ticker chart endpoint returns
+    the series normally.
+
+    Deliberately OUTSIDE the circuit breaker. A delisted or misspelled symbol
+    fails on every attempt, and counting those against the breaker would trip it
+    (threshold 5) and block the next run's batch download for a minute over what
+    is a universe problem, not a service problem.
+
+    Returns a tz-naive daily frame, or None when nothing came back.
+    """
+    for attempt in range(_RECOVERY_ATTEMPTS):
+        try:
+            df = yf.Ticker(symbol).history(
+                start=start_date,
+                end=end_date + timedelta(days=1),
+                auto_adjust=True,     # matches yf.download's default, so recovered
+                actions=False,        # prices sit on the same adjustment basis
+            )
+        except Exception:
+            df = None
+        if df is not None and not df.empty:
+            idx = pd.DatetimeIndex(df.index)
+            if idx.tz is not None:
+                # The batch panel is tz-naive; Ticker.history returns
+                # Asia/Kolkata for .NS names. Reindexing one onto the other
+                # without this silently yields an all-NaN column.
+                idx = idx.tz_localize(None)
+            out: pd.DataFrame = df.copy()
+            out.index = idx.normalize()
+            return out
+        if attempt + 1 < _RECOVERY_ATTEMPTS:
+            time.sleep(_RECOVERY_DELAY)
+    return None
+
+
+def _recover_missing_symbols(
+    all_data: pd.DataFrame,
+    symbols_to_process: List[str],
+    start_date: datetime,
+    end_date: datetime,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Re-fetch and merge the symbols the batch download missed.
+
+    Runs BEFORE the failed-ticker drop, so a symbol recovered here stays in the
+    universe rather than disappearing from the book. Recovered bars only ever
+    FILL holes — an existing batch value is never overwritten, so recovery
+    cannot quietly restate prices the rest of the panel was built on.
+    """
+    report: Dict[str, Any] = {"missing": [], "recovered": [], "failed": [],
+                              "skipped_reason": None}
+    try:
+        # Selecting one level of a MultiIndex column yields a DataFrame. The
+        # pandas stubs type __getitem__(str) as returning a Series, which it is
+        # not here, so the shape has to be asserted rather than inferred.
+        close = cast(pd.DataFrame, all_data["Close"])
+    except (KeyError, TypeError):
+        return all_data, report
+
+    missing = _unfetched_symbols(close, symbols_to_process)
+    report["missing"] = list(missing)
+    if not missing:
+        return all_data, report
+
+    # An outage is not a per-symbol problem, and the batch retry has already
+    # covered the transient case. Fail fast instead of grinding.
+    if len(missing) > _RECOVERY_FAILURE_RATIO * len(symbols_to_process):
+        report["skipped_reason"] = "outage"
+        return all_data, report
+    if len(missing) > _RECOVERY_MAX_SYMBOLS:
+        report["skipped_reason"] = "budget"
+        missing = missing[:_RECOVERY_MAX_SYMBOLS]
+
+    console = None
+    try:
+        from logger_config import console as _c
+        console = _c
+    except Exception:
+        pass
+
+    recovered: Dict[str, pd.DataFrame] = {}
+    consecutive_failures = 0
+    for sym in missing:
+        df = _refetch_symbol(sym, start_date, end_date)
+        if df is None:
+            report["failed"].append(sym)
+            consecutive_failures += 1
+            if consecutive_failures >= _RECOVERY_ABORT_AFTER:
+                # Nothing is coming back at all — stop spending the budget.
+                report["skipped_reason"] = "aborted"
+                break
+            continue
+        consecutive_failures = 0
+        recovered[sym] = df
+        report["recovered"].append(sym)
+
+    for sym, df in recovered.items():
+        for field_name in ("Open", "High", "Low", "Close", "Volume"):
+            if field_name not in df.columns:
+                continue
+            series = pd.to_numeric(df[field_name], errors="coerce").reindex(all_data.index)
+            col = (field_name, sym)
+            if col in all_data.columns:
+                all_data[col] = all_data[col].fillna(series)   # fill holes only
+            else:
+                all_data[col] = series
+    if recovered:
+        # Adding columns leaves the MultiIndex unsorted, which makes the
+        # (slice(None), tickers) selection below raise or warn.
+        all_data = all_data.sort_index(axis=1)
+
+    if report["recovered"] or report["failed"]:
+        msg = (f"Re-fetch: {len(report['recovered'])} of {len(report['missing'])} "
+               f"missing symbol(s) recovered"
+               + (f", {len(report['failed'])} still unavailable" if report["failed"] else ""))
+        if console is not None:
+            try:
+                if report["recovered"]:
+                    console.success(msg)
+                else:
+                    console.warning(msg)
+            except Exception:
+                pass
+    return all_data, report
+
+
 def generate_historical_data(
     symbols_to_process: List[str],
     start_date: datetime,
@@ -473,6 +666,20 @@ def generate_historical_data(
         metrics.add_error("RuntimeError", "No valid market data received from yfinance", "data_validation")
         raise ValueError("No valid market data received from yfinance - check symbols and date range")
     
+    # === RECOVERY: re-fetch what the batch download missed ===
+    # Runs BEFORE the drop below, so a symbol that comes back on the second pass
+    # keeps its place in the universe instead of vanishing from the book.
+    if len(symbols_to_process) > 1:
+        all_data, recovery = _recover_missing_symbols(
+            all_data, symbols_to_process, start_date, end_date
+        )
+        metrics.data_recovery = recovery
+        if recovery["recovered"]:
+            metrics.add_warning(
+                f"Re-fetched {len(recovery['recovered'])} symbol(s) the batch download "
+                f"missed: {', '.join(recovery['recovered'])}"
+            )
+
     # === VALIDATION 4: Remove Failed Tickers ===
     if len(symbols_to_process) > 1:
         valid_tickers = all_data['Close'].dropna(how='all', axis=1).columns
@@ -480,17 +687,27 @@ def generate_historical_data(
         
         if invalid_tickers:
             invalid_ratio = len(invalid_tickers) / len(symbols_to_process)
-            if invalid_ratio > 0.5:
-                metrics.add_warning(
-                    f"More than 50% of tickers have no data ({len(invalid_tickers)}/{len(symbols_to_process)})"
-                )
-                try:
-                    from logger_config import console
+            # Every drop is now reported, not just a majority failure: a book
+            # built on 28 of 30 names is a different book, and the two symbols
+            # survived a dedicated re-fetch before being given up on.
+            metrics.add_warning(
+                f"{len(invalid_tickers)}/{len(symbols_to_process)} tickers have no data "
+                f"after re-fetch: {', '.join(invalid_tickers[:12])}"
+                + (" …" if len(invalid_tickers) > 12 else "")
+            )
+            try:
+                from logger_config import console
+                if invalid_ratio > 0.5:
                     console.warning(
                         f"⚠️ {len(invalid_tickers)}/{len(symbols_to_process)} tickers have no data - check symbol validity"
                     )
-                except Exception:
-                    pass
+                else:
+                    console.warning(
+                        f"Dropping {len(invalid_tickers)} symbol(s) with no data after re-fetch: "
+                        f"{', '.join(invalid_tickers[:12])}"
+                    )
+            except Exception:
+                pass
             
             if len(invalid_tickers) == len(symbols_to_process):
                 metrics.add_error(
@@ -501,7 +718,13 @@ def generate_historical_data(
                 raise ValueError("No valid tickers in data - all symbols failed. Check your universe selection")
             
             all_data = all_data.loc[:, (slice(None), valid_tickers)]
-            symbols_to_process = list(valid_tickers)
+            # Filter the EXISTING order rather than adopting yfinance's column
+            # order, which is alphabetical. Snapshot rows are emitted in this
+            # order and Equal Weight now selects in it (see nco.compute_nco_
+            # portfolio), so a partial failure must not silently reorder the
+            # universe.
+            _valid = set(valid_tickers)
+            symbols_to_process = [s for s in symbols_to_process if s in _valid]
     
     # Update metrics with actual valid symbols
     metrics.symbols_count = len(symbols_to_process)
@@ -529,7 +752,13 @@ def generate_historical_data(
             
             if not symbol_df.empty:
                 indicators_df = calculate_all_indicators(symbol_df, oscillator_calculator)
-                ticker_indicator_cache[ticker] = indicators_df
+                # calculate_all_indicators returns None for a symbol it cannot
+                # compute. Caching that None meant the snapshot loop below
+                # dereferenced it (`full_indicator_df.index`) and took the whole
+                # run down over one bad symbol — the failure mode the per-symbol
+                # skip in this loop's except clause exists to prevent.
+                if indicators_df is not None:
+                    ticker_indicator_cache[ticker] = indicators_df
 
         except (pd.errors.DataError, KeyError, IndexError, ValueError) as e:
             # ValueError added: a malformed bar (e.g. NaN high/low reaching an
@@ -577,7 +806,6 @@ def generate_historical_data(
     # forever at a frozen price. Leading NaNs are untouched (ffill only
     # propagates forward), so a symbol still cannot appear before its history
     # begins, and the warmup skip above is unaffected.
-    _STALE_BARS = 5
     for _t in list(ticker_indicator_cache):
         _df = ticker_indicator_cache[_t]
         if _df is None or _df.empty:
