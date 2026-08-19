@@ -17,7 +17,7 @@ import streamlit as st
 
 from ui.components import (
     render_empty_state,
-    render_interpretation_card,
+    render_note,
     render_section_header,
     render_table_panel,
 )
@@ -70,21 +70,19 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
     import json as _json
 
     render_section_header(
-        "Broker JSON Sync",
-        "Write curated units into broker order templates · curate → sync → execute",
+        "Order Templates",
+        "Curated units written into broker order files · curate → sync → execute",
         icon="download",
         accent="cyan",
     )
 
     # Guard: nothing to sync until a portfolio has been curated.
     if portfolio is None or portfolio.empty or "symbol" not in portfolio.columns or "units" not in portfolio.columns:
-        render_interpretation_card(
-            title="NO CURATED PORTFOLIO",
-            body=(
-                "Run an analysis first — the sync uses the live curated portfolio "
-                "directly, so there is nothing to map onto your broker templates yet."
-            ),
-            color="warning",
+        render_empty_state(
+            "No curated portfolio",
+            "The sync reads the live curated book directly, so there is nothing to map "
+            "onto a broker template until a book exists.",
+            action_label="Run Analysis in the rail",
         )
         return
 
@@ -95,11 +93,16 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
     }
     tradable = sum(1 for u in qty_map.values() if u > 0)
 
-    # ── Balanced two-column layout, mirroring the Intelligence tab exactly ─────
-    #    col1 = status card + template uploader
-    #    col2 = results table + totals line + per-file downloads
-    col1, col2 = st.columns([1, 1])
-
+    # ── ONE COLUMN, BECAUSE THE FLOW IS ONE SEQUENCE ─────────────────────
+    # This was a 50/50 split: status card and uploader left, results table and
+    # downloads right. Upload → sync → download is linear, so the split made
+    # the reader zig-zag — and the status card had to end with "download the
+    # import-ready files on the right", which is a component pointing at
+    # another column because the layout could not carry the order itself.
+    #
+    # It also gave one file input the same width as a table plus N actions, and
+    # stated its counts as a sentence where every other page in the app states
+    # counts as cards.
     # Process uploaded templates once, up front, so both columns read the same
     # deterministic result set (status card, results table, download buttons).
     json_files = st.session_state.get("broker_sync_json_uploader")
@@ -145,99 +148,86 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
                     _t.warn(f"{ok} of {n_templates} template(s) synced · "
                             f"{n_templates - ok} failed")
 
-    with col1:
-        if n_templates == 0:
-            render_interpretation_card(
-                title="AWAITING TEMPLATES",
-                body=(
-                    f"Curated book holds <strong>{tradable}</strong> tradable holding(s). "
-                    "Upload one or more broker order-template JSONs (e.g. Kite "
-                    "<strong>ETF.json</strong>) to sync their quantities."
-                ),
-                color="info",
+
+    # ── INPUT | OUTPUT, 5/12 and 7/12 ────────────────────────────────────
+    # Two columns, but not the two this page had. The old split was status
+    # card | results table, which is one reading cut in half — the card even
+    # had to end with "download the files on the right". These two are
+    # genuinely parallel: what you give the page, and what it gives back. The
+    # eye crosses once, left to right, and never comes back.
+    #
+    # Weighted because they are not peers: a file input is a compact control,
+    # a results table wants the measure. See `st-key-split-` in theme.css.
+    with st.container(key="split-broker-sync"):
+        _in, _out = st.columns(2, gap="medium")
+
+        with _in:
+            st.file_uploader(
+                "Upload broker JSON templates",
+                type=["json"],
+                accept_multiple_files=True,
+                help="Your original broker order files (e.g. Kite ETF.json). Each "
+                     "instrument's quantity is set from the curated units for its "
+                     "trading symbol.",
+                key="broker_sync_json_uploader",
+                label_visibility="collapsed",
             )
-        elif ok == 0:
-            render_interpretation_card(
-                title="NO FILES SYNCED",
-                body=(
-                    f"None of the <strong>{n_templates}</strong> uploaded template(s) could be "
-                    "processed. Check that each is a valid broker order JSON."
-                ),
-                color="danger",
-            )
-        else:
-            _skip_note = (
-                f" <strong>{total_skipped_zero}</strong> matched instrument(s) left untouched "
-                "(curated at 0 units)."
-                if total_skipped_zero > 0 else ""
-            )
-            render_interpretation_card(
-                title="READY TO EXPORT",
-                body=(
-                    f"Synced <strong>{ok}/{n_templates}</strong> template(s) · "
-                    f"<strong>{total_updated}</strong> instrument(s) updated from "
-                    f"<strong>{tradable}</strong> tradable holding(s).{_skip_note} "
-                    "Download the import-ready files on the right."
-                ),
-                color="success",
+            render_note(
+                f"The curated book holds **{tradable}** tradable holding(s). Every "
+                "instrument whose trading symbol matches one of them has its "
+                "**params.quantity** rewritten; everything else is left exactly as it "
+                "was, and your original files are never modified."
             )
 
-        st.file_uploader(
-            "Upload broker JSON templates",
-            type=["json"],
-            accept_multiple_files=True,
-            help="Your original broker order files (e.g. ETF.json). Each instrument's "
-                 "quantity is set from the curated units for its trading symbol.",
-            key="broker_sync_json_uploader",
-            label_visibility="collapsed",
-        )
-
-    with col2:
-        # The same table primitive as the holdings book. This was a third
-        # hand-rolled <table> with its own column widths and per-cell inline
-        # colours — the app's third table system, on the one page whose output
-        # goes to a broker.
-        if n_templates == 0:
-            render_empty_state(
-                "No templates uploaded",
-                "Upload one or more broker order-template JSONs to map curated units "
-                "onto their instruments.",
-                action_label="Kite exports one file per basket, e.g. ETF.json",
-            )
-        else:
-            _rows = []
-            for fname, payload, count, skipped_zero, err in results:
-                if err is not None:
-                    _rows.append({"Template": fname, "Updated": np.nan, "Status": "ERROR"})
-                    continue
-                # Distinguish "matched nothing at all" from "matched, but every
-                # match was a 0-unit holding left untouched" — the old NO MATCH
-                # label conflated both (see AUDIT_DIRECTIVES.md B8).
-                if count > 0:
-                    status = "SYNCED"
-                elif skipped_zero > 0:
-                    status = f"SKIPPED · {skipped_zero} @ 0 units"
-                else:
-                    status = "NO MATCH"
-                _rows.append({"Template": fname, "Updated": float(count), "Status": status})
-            render_table_panel(
-                pd.DataFrame(_rows), "sync-results",
-                context=f"{ok} of {n_templates} template(s) synced",
-                show_index=False, label_col="Template",
-                col_precision={"Updated": 0},
-                max_height=360,
-            )
-
-            for fname, payload, count, skipped_zero, err in results:
-                if payload is not None:
-                    st.download_button(
-                        label=f"Download updated {fname}",
-                        data=payload,
-                        file_name=f"updated_{fname}",
-                        mime="application/json",
-                        use_container_width=True,
-                        key=f"broker_sync_dl_{fname}",
-                    )
+        with _out:
+            if n_templates == 0:
+                render_empty_state(
+                    "Nothing synced yet",
+                    "Upload one or more broker order templates and the mapped result "
+                    "appears here, ready to download.",
+                    action_label="Kite exports one file per basket, e.g. ETF.json",
+                )
+            else:
+                # The same table primitive as the holdings book — a third
+                # hand-rolled <table> used to live here, on the one page whose
+                # output goes to a broker.
+                _rows = []
+                for fname, payload, count, skipped_zero, err in results:
+                    if err is not None:
+                        _rows.append({"Template": fname, "Updated": np.nan,
+                                      "Status": "ERROR"})
+                        continue
+                    # Distinguish "matched nothing at all" from "matched, but
+                    # every match was a 0-unit holding left untouched" — the old
+                    # NO MATCH label conflated both (AUDIT_DIRECTIVES.md B8).
+                    if count > 0:
+                        status = "SYNCED"
+                    elif skipped_zero > 0:
+                        status = f"SKIPPED · {skipped_zero} @ 0 units"
+                    else:
+                        status = "NO MATCH"
+                    _rows.append({"Template": fname, "Updated": float(count),
+                                  "Status": status})
+                render_table_panel(
+                    pd.DataFrame(_rows), "sync-results",
+                    context=f"{ok} of {n_templates} synced · "
+                            f"{total_updated} instrument(s) updated"
+                            + (f" · {total_skipped_zero} left at 0 units"
+                               if total_skipped_zero else ""),
+                    show_index=False, label_col="Template",
+                    col_precision={"Updated": 0},
+                    max_height=320,
+                )
+                for fname, payload, _c, _s, err in results:
+                    if payload is not None and err is None:
+                        st.download_button(
+                            label=f"Download {fname}",
+                            data=payload,
+                            file_name=f"updated_{fname}",
+                            mime="application/json",
+                            use_container_width=True,
+                            key=f"broker_sync_dl_{fname}",
+                        )
 
     # ── Full-width METHOD card (Obsidian Quant fidelity) — mirrors the
     #    Intelligence tab's method card: header + pill + lede + tile grid.
@@ -257,7 +247,7 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
             '</div>'
             '<div class="intel-method-grid">'
 
-                '<div class="intel-method-tile tile-learns">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Source</div>'
                     '<div class="tile-body">'
                         'The live curated portfolio in memory — its <code>symbol</code> and '
@@ -266,7 +256,7 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-how">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Mapping</div>'
                     '<div class="tile-body">'
                         'For each instrument in a template, if its '
@@ -275,7 +265,7 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-obj">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Templates</div>'
                     '<div class="tile-body">'
                         'Standard broker order JSONs (e.g. Kite <code>ETF.json</code>). '
@@ -284,7 +274,7 @@ def _render_broker_sync_tab(portfolio: pd.DataFrame):
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-safety">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Safety</div>'
                     '<div class="tile-body">'
                         'Non-destructive: instruments with no matching holding, or matching a '

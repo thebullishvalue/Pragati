@@ -52,8 +52,8 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
     _rc = st.session_state.get("run_context") or {}
     _label = style_spec(_rc)["label"]
     render_section_header(
-        "Curated Portfolio Holdings",
-        f"{len(portfolio)} positions · {_label}",
+        "Positions",
+        f"{len(portfolio)} holdings · {_label}",
         icon="briefcase", accent="accent",
     )
 
@@ -172,7 +172,7 @@ def _render_portfolio_tab(portfolio: pd.DataFrame, current_df: pd.DataFrame, cap
         sil = portfolio.attrs.get("nco_silhouette", 0.0)
         _clusters_drive = bool(portfolio.attrs.get("nco_uses_clusters", False))
         render_section_header(
-            "Risk Structure",
+            "Cluster Structure",
             f"Correlation matrix ordered by cluster · {k} clusters · silhouette {sil:.2f}"
             + ("" if _clusters_drive else " · diagnostic only"),
             icon="layers", accent="violet")

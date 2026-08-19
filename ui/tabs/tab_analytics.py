@@ -117,7 +117,8 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     selection is identical across styles. Omitted on Equal Weight runs, where it
     would duplicate the portfolio line.
     """
-    from analytics import resolve_benchmark, resolve_risk_free_rate, compute_metrics
+    from analytics import (CAGR_MIN_DAYS, resolve_benchmark, resolve_risk_free_rate,
+                           compute_metrics)
     from charts import create_benchmark_comparison_chart
 
     # Scope comes from the FROZEN run_context — the universe this book was
@@ -326,7 +327,7 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     # pairwise ones (beta, capture, tracking error) follow below.
     _cagr_ok = m.get("cagr_meaningful", True)
     render_section_header(
-        "Head to Head",
+        "Comparative Statistics",
         f"{_style} vs equal weight vs {bench_name}"
         + ("" if _cagr_ok else " · CAGR hidden, window too short to annualize"),
         icon="zap", accent="emerald",
@@ -435,23 +436,39 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     # ── Relationship to benchmark ─────────────────────────────────────────────
     # These have no meaning for a single book — every one is a statistic ABOUT
     # the pairing — so they cannot live in the table above.
-    render_section_header("Relationship to Benchmark", f"How the book moves with {bench_name}",
+    render_section_header("Benchmark Relationship", f"How the book moves with {bench_name}",
                           icon="compass", accent="cyan")
     # One strip, not six hand-placed columns: the strip owns the wrapping rule,
     # so this row reflows to two rows of three on a tablet instead of six
     # columns squeezed to 90px each.
     _b = m.get("beta", 1)
-    _a = m.get("alpha", 0)
+    # Alpha reports the ANNUALIZED CAPM residual once the window can carry one,
+    # and the PERIOD residual before that. Both answer "did the book beat what
+    # its beta entitled it to"; only the first also claims a per-annum rate,
+    # which is the part a six-week window cannot support. The card previously
+    # printed a dash and "Window too short" for the whole metric, which read as
+    # a broken feature rather than a withheld annualization — the residual was
+    # always computable and is the number a reader actually wants.
+    # alpha_days is 0 only when the benchmark series never overlapped the book's
+    # window — no pairing, so no residual. That is the one case with genuinely
+    # nothing to print, and it is a different statement from a short window.
+    _a_days = int(m.get("alpha_days", 0) or 0)
+    _a_paired = _a_days > 0
+    _a_annual = _a_paired and _cagr_ok and _a_days >= CAGR_MIN_DAYS
+    _a = m.get("alpha", 0) if _a_annual else m.get("alpha_period", 0)
     _uc = m.get("up_capture", 100)
     _dc = m.get("down_capture", 100)
     render_kpi_strip([
         {"label": "Beta", "value": f"{_b:.2f}", "subtext": "Market sensitivity",
          "color_class": "warning" if _b > 1.2 else "info" if _b < 0.8 else "neutral"},
-        {"label": "Alpha",
-         "value": f"{_a:+.2f}%" if _cagr_ok else "—",
-         "subtext": "CAPM excess" if _cagr_ok else "Window too short",
+        {"label": "Alpha" if _a_annual or not _a_paired else "Alpha · Period",
+         "value": f"{_a:+.2f}%" if _a_paired else "—",
+         "subtext": ("CAPM excess, annualized" if _a_annual else
+                     f"CAPM excess over {_a_days} trading days · "
+                     f"annualized from {CAGR_MIN_DAYS}") if _a_paired else
+                    f"No overlap with {bench_name}",
          "color_class": ("success" if _a > 0 else "danger" if _a < 0 else "neutral")
-                        if _cagr_ok else "neutral"},
+                        if _a_paired else "neutral"},
         {"label": "Correlation", "value": f"{m.get('correlation', 0):.2f}",
          "subtext": f"R² {m.get('r_squared', 0):.2f}", "color_class": "info"},
         {"label": "Tracking Error", "value": f"{m.get('tracking_error', 0):.1f}%",
@@ -463,7 +480,14 @@ def _render_analytics_tab(portfolio: pd.DataFrame):
     ], max_cols=6, key="benchmark-rel")
     render_note(
         f"**Beta** is the book's sensitivity to {bench_name}; **Alpha** is return beyond what that "
-        f"beta explains. **Up/Down Capture** are the share of the benchmark's rise and fall the book "
+        f"beta explains"
+        + ("." if _a_annual or not _a_paired else
+           f" — stated here **over the window itself**, not per annum, because "
+           f"{_a_days} trading days is under the {CAGR_MIN_DAYS} an annualized figure needs. "
+           f"Extrapolating a window this short multiplies its noise by the same factor it "
+           f"multiplies the return, so the rate is withheld while the excess it is built from "
+           f"is not.")
+        + f" **Up/Down Capture** are the share of the benchmark's rise and fall the book "
         f"participates in — the ideal pairing is above 100% up and below 100% down. **Tracking "
         f"Error** is the volatility of the difference, so it measures how far the book is allowed "
         f"to wander from the market, not whether it wandered profitably."

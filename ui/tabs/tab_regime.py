@@ -17,13 +17,12 @@ import pandas as pd
 import streamlit as st
 
 from ui.components import (
+    panel,
     render_chart_panel,
     render_empty_state,
     render_kpi_strip,
     render_note,
-    render_regime_badge,
     render_section_header,
-    render_sub_header,
 )
 from ui.shared import NCO_STYLES, REGIME_FACTOR_ORDER, STYLE_LABELS, num, style_spec
 from regime import FACTOR_WEIGHTS, get_regime_history_series
@@ -57,7 +56,7 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
     factors_raw = regime_result.get("factors", {})
 
     # Current Regime Banner
-    render_section_header("Current Market Regime", "10-day indicator window", icon="eye")
+    render_section_header("Current Reading", "Eight factors over a 10-day window", icon="eye")
 
     # NOTE: the badge + factor scores are rendered as ONE self-contained HTML flex
     # row (not st.columns), so vertical centring is under our control — Streamlit's
@@ -97,33 +96,54 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
         )
     _factors_html = "".join(_rows)
 
-    # The regime, then its inputs — in that order and both full width. This was
-    # a two-column flex row with the regime drawn as a gradient-filled card at
-    # 2.3rem: the largest type and the only gradient in the application, spent
-    # on the one reading nothing downstream is conditioned on. It is context,
-    # so it is now a readout with a single tinted edge, and the factors below
-    # it get the full measure they need to be compared against each other.
-    render_regime_badge(
-        name=regime_name,
-        description=mix_name,
-        score=float(score),
-        confidence=float(confidence),
-        colour=color,
-        icon=icon_key,
-    )
+    # THE REGIME IN THE APP'S OWN GRAMMAR.
+    #
+    # This was a bespoke component — `render_regime_badge`, a tinted readout
+    # with its own class family — for a reading the rest of the product would
+    # have expressed as numbers in a KPI strip. It was the only place in the
+    # app where four headline figures were drawn by a component that existed
+    # nowhere else, which is precisely the thing this design system is for.
+    #
+    # Now: a KPI strip for the reading, a panel for its inputs, a note for what
+    # it means. Identical anatomy to the Holdings page, the Performance page
+    # and the landing — the regime stops being a special case and starts being
+    # a page.
+    _regime_tone = {
+        "STRONG_BULL": "success", "BULL": "success", "WEAK_BULL": "success",
+        "CHOP": "neutral", "UNKNOWN": "neutral",
+        "WEAK_BEAR": "warning", "BEAR": "danger", "CRISIS": "danger",
+    }.get(regime_name.upper().replace("-", "_"), "neutral")
+    render_kpi_strip([
+        {"label": "Regime", "value": regime_name.replace("_", " "),
+         "subtext": mix_name, "color_class": _regime_tone, "icon": icon_key},
+        {"label": "Composite Score", "value": f"{float(score):+.2f}",
+         "subtext": "Weighted sum of eight factors · −2 to +2",
+         "color_class": "neutral"},
+        {"label": "Confidence", "value": f"{float(confidence):.0%}",
+         "subtext": "Agreement across the eight",
+         "color_class": "info" if confidence >= 0.6 else "warning"},
+        {"label": "Window", "value": "10d",
+         "subtext": "Trailing indicator window", "color_class": "neutral"},
+    ], max_cols=4, key="regime-current")
 
-    # A labelled division inside the section — the app's one sub-header tier,
-    # rather than a fourth hand-rolled heading size.
-    render_sub_header("Factor Scores")
-    st.markdown(
-        f'<div class="factor-block">'
-        f'<div class="factor-lede">Signed composite inputs · −2 bearish ↔ +2 bullish, '
-        f'each weighted as shown</div>'
-        f'<div class="factor-scale">'
-        f'<span>−2 Bearish</span><span>0 Neutral</span><span>+2 Bullish</span></div>'
-        f'{_factors_html}'
-        f'</div>',
-        unsafe_allow_html=True,
+    # The eight inputs, inside the same panel chrome every other data surface
+    # in the app uses — header stating what it is, body carrying the data.
+    with panel("regime-factors", context="8 factors · fixed weights · −2 to +2"):
+        st.markdown(
+            f'<div class="factor-block">'
+            f'<div class="factor-scale">'
+            f'<span>−2 Bearish</span><span>0 Neutral</span><span>+2 Bullish</span></div>'
+            f'{_factors_html}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    render_note(
+        "Each bar is one factor's signed contribution, drawn from the centre so the "
+        "**side** carries the direction and the **length** carries the strength. The "
+        "percentage after each name is the weight it takes into the composite above — "
+        "**fixed**, never calibrated, so the same conditions always produce the same "
+        "reading. Nothing downstream is conditioned on any of it: the regime is context "
+        "for reading the book, not an input to it."
     )
 
     # ── Full-width METHOD card (Obsidian Quant fidelity) — mirrors the
@@ -147,7 +167,7 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
             '</div>'
             '<div class="intel-method-grid">'
 
-                '<div class="intel-method-tile tile-learns">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Momentum &amp; Trend</div>'
                     '<div class="tile-body">'
                         'RSI trajectory, oscillator direction, price/MA alignment and the share of '
@@ -155,7 +175,7 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-how">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Breadth &amp; Velocity</div>'
                     '<div class="tile-body">'
                         'Cross-sectional participation and the first/second derivative of momentum '
@@ -163,7 +183,7 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-obj">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Extremes, Volatility &amp; Acceptance</div>'
                     '<div class="tile-body">'
                         'Z-score crowding, Bollinger band-width regime, and the volume-profile '
@@ -171,7 +191,7 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-safety">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Reading the bars</div>'
                     '<div class="tile-body">'
                         'Each factor bar is <strong>centre-anchored</strong>: it grows right (green) '
@@ -193,7 +213,8 @@ def _render_regime_tab(regime_result: Dict, regime_series: List, training_data: 
         st.session_state.regime_history_series = regime_series_to_use
 
     if regime_series_to_use and len(regime_series_to_use) > 0:
-        render_section_header("Regime Score History", "Rolling 10-day composite", icon="activity", accent="emerald")
+        render_section_header("Score History", "Composite over rolling 10-day windows",
+                              icon="activity", accent="emerald")
 
         regimes_seq = [r.regime for r in regime_series_to_use]
         transitions = sum(1 for i in range(1, len(regimes_seq)) if regimes_seq[i] != regimes_seq[i-1])

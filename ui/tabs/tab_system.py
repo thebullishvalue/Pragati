@@ -27,7 +27,8 @@ from ui.theme import VERSION
 def _render_system_tab(training_window: List):
     """Tab — System configuration + methodology reference (Obsidian Quant)."""
     # ── Configuration — the run's settings as a clean KV readout ───────────────
-    render_section_header("Configuration", "Run settings & data source", icon="settings", accent="cyan")
+    render_section_header("Run Settings", "What this book was curated under",
+                          icon="settings", accent="cyan")
     # Everything here comes from the FROZEN run_context — the settings this book
     # was actually built under, never the live sidebar. Browsing after a run
     # must not relabel a curated portfolio.
@@ -132,7 +133,7 @@ def _render_system_tab(training_window: List):
         )
 
     # ── Methodology ───────────────────────────────────────────────────────────
-    render_section_header("Methodology", "How a portfolio is curated",
+    render_section_header("Curation Method", "How a portfolio is built, and what it targets",
                           icon="target", accent="emerald")
     _m_spec = style_spec(st.session_state.get("run_context") or {})
     method_html = (
@@ -148,7 +149,7 @@ def _render_system_tab(training_window: List):
             '</div>'
             '<div class="intel-method-grid">'
 
-                '<div class="intel-method-tile tile-learns">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Cluster</div>'
                     '<div class="tile-body">'
                         'Holdings are grouped by <code>d = sqrt(0.5(1 - &rho;))</code> correlation '
@@ -160,7 +161,7 @@ def _render_system_tab(training_window: List):
                     '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-how">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Allocate</div>'
                     '<div class="tile-body">'
                         + {
@@ -186,14 +187,14 @@ def _render_system_tab(training_window: List):
                     + '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-obj">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">What it targets</div>'
                     '<div class="tile-body">'
                         + _m_spec["evidence"].replace("--", "&mdash;")
                     + '</div>'
                 '</div>'
 
-                '<div class="intel-method-tile tile-safety">'
+                '<div class="intel-method-tile">'
                     '<div class="tile-label">Why not forecast</div>'
                     '<div class="tile-body">'
                         'Grinold\'s Fundamental Law caps forecast-driven excess return at '
