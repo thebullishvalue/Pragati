@@ -2923,6 +2923,107 @@
     .js-plotly-plot .modebar { opacity: 1 !important; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   16. RECLAIMING STREAMLIT'S OWN NATIVES
+   ═══════════════════════════════════════════════════════════════════════════
+
+   A handful of controls paint themselves from Streamlit's JS theme object
+   rather than from a class: the nav links, the button faces, input text and
+   placeholders, and every portalled overlay (menus, tooltips). That object is
+   built ONCE at page load from `.streamlit/config.toml` and cannot follow the
+   app's Slate/Paper toggle, which swaps CSS tokens at render time.
+
+   These rules used to live only in `ui.theme.LIGHT_TOKENS`, on the reasoning
+   that Streamlit's defaults were already right for Slate — true only while
+   config.toml was pinned dark. That made the config load-bearing: the moment
+   its base changed to match a Paper default, all thirty-five of these
+   (selector, property) pairs went unclaimed in Slate and the same bug appeared
+   in the other mode. A stylesheet that is correct only for one value of a
+   file it does not control is not correct.
+
+   Every declaration below is a TOKEN, and the tokens already swap with the
+   appearance — so one block is right in both. LIGHT_TOKENS keeps only the two
+   rules that genuinely cannot be expressed as a token swap. config.toml now
+   decides nothing except the colour of the first paint. */
+
+[data-testid="stSidebarNavLink"],
+[data-testid="stSidebarNavLink"] span,
+[data-testid="stSidebarNavLink"] p { color: var(--ink-tertiary) !important; }
+[data-testid="stSidebarNavLink"]:hover,
+[data-testid="stSidebarNavLink"]:hover span { color: var(--ink) !important; }
+[data-testid="stSidebarNavLink"][aria-current="page"],
+[data-testid="stSidebarNavLink"][aria-current="page"] span { color: var(--ink) !important; }
+[data-testid="stNavSectionHeader"] { color: var(--ink-quaternary) !important; }
+
+/* Colour and border only. The FACE of a button is elevation, and elevation is
+   already stated for graphite further up this file — see the note in
+   LIGHT_TOKENS on why it cannot be one token. */
+[data-testid^="stBaseButton"] {
+    color: var(--ink-secondary) !important;
+    border-color: var(--line-strong) !important;
+}
+[data-testid^="stBaseButton"]:hover { color: var(--ink) !important; }
+[data-testid="stBaseButton-primary"] {
+    background: var(--accent) !important; color: #FFFFFF !important;
+}
+
+/* Inputs, their text, and — the easiest one to miss — their placeholders. */
+.stTextInput input, .stNumberInput input, .stTextArea textarea,
+.stSelectbox [data-baseweb="select"] span,
+.stSelectbox [data-baseweb="select"] div { color: var(--ink) !important; }
+input::placeholder, textarea::placeholder { color: var(--ink-quaternary) !important; opacity: 1; }
+.stTextArea textarea {
+    background: var(--surface-1) !important;
+    border-color: var(--line-strong) !important;
+}
+.stSelectbox [data-baseweb="select"] > div,
+[data-testid="stNumberInputContainer"],
+.stDateInput [data-baseweb="input"],
+.stTextInput input { border-color: var(--line-strong) !important; }
+.stSelectbox [data-baseweb="select"] svg { color: var(--ink-quaternary) !important; }
+
+/* Portalled overlays. BaseWeb renders these at the document root, so they
+   inherit nothing from the app and every one of their four or five nested
+   divs carries its own background. The pattern is: paint the shell, blank
+   every descendant, then reinstate the two or three states that genuinely
+   carry a fill. Source order matters — the reset precedes the states. */
+[data-baseweb="popover"] > div,
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] [data-baseweb="menu"] {
+    color: var(--ink) !important;
+    border-color: var(--line-strong) !important;
+}
+[data-baseweb="popover"] * { background-color: transparent !important; }
+[data-baseweb="popover"] [role="option"] { color: var(--ink-secondary) !important; }
+[data-baseweb="popover"] [role="option"]:hover { background-color: var(--surface-2) !important; }
+[data-baseweb="popover"] [role="option"][aria-selected="true"] {
+    color: var(--ink) !important; background-color: var(--surface-2) !important;
+}
+[data-baseweb="tooltip"], [data-baseweb="tooltip"] > div,
+[role="tooltip"], [role="tooltip"] > div {
+    background: var(--surface-3) !important;
+    color: var(--ink) !important;
+    border-color: var(--line-strong) !important;
+}
+[data-baseweb="tooltip"] *, [role="tooltip"] * {
+    background-color: transparent !important; color: var(--ink) !important;
+}
+
+/* Input shells: the inner surface and the shadow Streamlit pairs with it. */
+.stDateInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
+.stTextInput [data-baseweb="input"], .stSelectbox [data-baseweb="select"] > div {
+    box-shadow: none !important;
+}
+.stDateInput [data-baseweb="input"] *, .stNumberInput [data-baseweb="input"] * {
+    background-color: transparent !important;
+}
+
+/* Segmented controls and body copy. */
+[data-testid="stButtonGroup"] button { color: var(--ink-tertiary) !important; }
+[data-testid="stButtonGroup"] button[data-testid$="Active"] { color: var(--ink) !important; }
+[data-testid="stMain"], [data-testid="stSidebar"] { color: var(--ink); }
+.stMarkdown, .stMarkdown p, .stMarkdown li { color: var(--ink-secondary); }
+
 /* Print is a real output of this app — a research note goes to PDF. Chrome
    and controls are dropped; the readings and the caveats on them are kept,
    because a printed valuation without its freshness notice is a claim

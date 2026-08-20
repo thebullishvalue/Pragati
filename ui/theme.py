@@ -143,127 +143,43 @@ LIGHT_TOKENS = """
     --shadow-sm:     0 1px 2px rgba(15, 23, 42, 0.06);
     --shadow-pop:    0 10px 24px rgba(15, 23, 42, 0.12);
 }
-/* Two rules cannot be expressed as a token swap. On paper the primary
-   button's hover needs a DARKER accent (the dark theme's is lighter), and
-   the sidebar rail reads better as the tinted surface with the content
-   area white — the reverse of the dark theme's arrangement. */
+
+/* ── What can NOT be a token swap ────────────────────────────────────────
+   Everything else Streamlit paints natively — nav links, button faces, input
+   text and placeholders, the portalled menus and tooltips — is claimed in
+   theme.css §16, in TOKENS, so one block serves both appearances. Those rules
+   used to live here, which quietly made `.streamlit/config.toml` load-bearing:
+   they were only needed because Streamlit's dark base happened to be right for
+   Slate, so the day that base changed to match a Paper default, Slate lost all
+   thirty-five of them at once. A rule that belongs to both themes belongs in
+   the file both themes load.
+
+   These two remain because they are genuinely light-only, not a swap:
+   on paper the primary button's hover needs a DARKER accent (the dark theme's
+   is lighter), and the rail reads better as the tinted surface with the
+   content area white — the reverse of the dark theme's arrangement. */
 [data-testid="stBaseButton-primary"]:hover { background: #244EB4 !important; border-color: #244EB4 !important; }
 [data-testid="stSidebar"] { background: var(--surface-2); }
 
-/* ── Reclaiming Streamlit's own natives ──────────────────────────────────
-   THIS is why Paper mode looked half-broken. `.streamlit/config.toml` pins
-   Streamlit to `base = "dark"` with `textColor = #E6EAF1`, and that is a
-   STATIC config — it cannot follow a runtime theme switch. So on Paper the
-   token swap repaints every surface white while Streamlit keeps colouring
-   its own internals near-white: the navigation labels, button faces, input
-   text and placeholders all went white-on-white. "Some fonts or elements
-   show up, some do not" is precisely a light ground wearing a dark-theme
-   text colour.
-
-   Anything the app styles through its own classes was already fine — which
-   is why the effect looked arbitrary rather than total. The rules below
-   claim the remainder. They live in LIGHT_TOKENS (not theme.css) because on
-   the dark theme Streamlit's defaults are already correct and overriding
-   them there would be noise. */
-[data-testid="stSidebarNavLink"],
-[data-testid="stSidebarNavLink"] span,
-[data-testid="stSidebarNavLink"] p { color: var(--ink-tertiary) !important; }
-[data-testid="stSidebarNavLink"]:hover,
-[data-testid="stSidebarNavLink"]:hover span { color: var(--ink) !important; }
-[data-testid="stSidebarNavLink"][aria-current="page"],
-[data-testid="stSidebarNavLink"][aria-current="page"] span { color: var(--ink) !important; }
-[data-testid="stNavSectionHeader"] { color: var(--ink-quaternary) !important; }
-
-/* Buttons: Streamlit's dark-base face is a dark pill, which on paper reads
-   as an inverted, "pressed" control sitting on a white rail. */
-[data-testid^="stBaseButton"] {
-    background: var(--surface-1) !important;
-    color: var(--ink-secondary) !important;
-    border-color: var(--line-strong) !important;
-}
-[data-testid^="stBaseButton"]:hover {
-    background: var(--surface-2) !important; color: var(--ink) !important;
-}
-[data-testid="stBaseButton-primary"] {
-    background: var(--accent) !important; color: #FFFFFF !important;
-}
-
-/* Inputs, their text, and — the easiest one to miss — their placeholders.
-   The select's own FACE needs claiming too: BaseWeb paints it from
-   Streamlit's dark base, so on Paper the dropdown stayed a dark well with
-   dark text while the rail around it went white. */
-.stTextInput input, .stNumberInput input, .stTextArea textarea,
-.stSelectbox [data-baseweb="select"] span,
-.stSelectbox [data-baseweb="select"] div { color: var(--ink) !important; }
-input::placeholder, textarea::placeholder { color: var(--ink-quaternary) !important; opacity: 1; }
-/* One ground for every field in the rail. The number and date controls are
-   named by their CONTAINER, not their inner input, because that is the node
-   each of them borders — see the one-node rule in theme.css. */
+/* ── Elevation inverts on paper ──────────────────────────────────────────
+   theme.css builds elevation by stepping UP the surface ramp: on graphite a
+   raised thing is lighter, so a menu sits on --surface-2 and a button hover
+   on --surface-3. On paper the ramp runs the other way — --surface-1 IS the
+   white and every step above it is a deeper grey — so the same "raised"
+   reading needs the ramp stepped DOWN. This is the second thing a token swap
+   cannot express: what changes is the DIRECTION, not the value, and no single
+   token name means "one step toward the light" in both. */
+[data-baseweb="popover"] > div,
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] [data-baseweb="menu"] { background: var(--surface-1) !important; }
+[data-testid^="stBaseButton"] { background: var(--surface-1) !important; }
+[data-testid^="stBaseButton"]:hover { background: var(--surface-2) !important; }
+/* Fields read as wells in both, but by opposite means: darker than the panel
+   on graphite (--bg), and white against a rail tinted --surface-2 on paper. */
 .stSelectbox [data-baseweb="select"] > div,
 .stTextInput input, .stTextArea textarea,
 [data-testid="stNumberInputContainer"],
-.stDateInput [data-baseweb="input"] {
-    background: var(--surface-1) !important;
-    border-color: var(--line-strong) !important;
-}
-.stSelectbox [data-baseweb="select"] svg { color: var(--ink-quaternary) !important; }
-/* The open menu is a portal at the document root — it inherits nothing from
-   the app, so it needs the light surface named explicitly.
-
-   And it needs it on EVERY node, not just the shell. BaseWeb builds these
-   overlays from a JS theme object made at page load out of
-   `.streamlit/config.toml`, which is static and pinned to Slate; on Paper the
-   whole overlay therefore arrives painted dark, and each of its four or five
-   nested divs carries its own background. Claiming the shell alone leaves
-   black strips wherever a deeper node paints — which is exactly how the
-   calendar failed: white day grid, black header and black empty cells.
-
-   So the pattern for every portalled surface is: paint the shell, blank every
-   descendant, then reinstate the two or three states that genuinely carry a
-   fill. Source order matters — the reset precedes the states. */
-[data-baseweb="popover"] > div,
-[data-baseweb="popover"] ul,
-[data-baseweb="popover"] [data-baseweb="menu"] {
-    background: var(--surface-1) !important;
-    color: var(--ink) !important;
-    border-color: var(--line-strong) !important;
-}
-[data-baseweb="popover"] * { background-color: transparent !important; }
-[data-baseweb="popover"] [role="option"] { color: var(--ink-secondary) !important; }
-[data-baseweb="popover"] [role="option"]:hover { background-color: var(--surface-2) !important; }
-[data-baseweb="popover"] [role="option"][aria-selected="true"] {
-    color: var(--ink) !important; background-color: var(--surface-2) !important;
-}
-/* Tooltips are portalled to the document root like the menus, and Streamlit
-   paints them from its static dark base — a black slab with white text on a
-   white page. The inner div carries the background, so both are named. */
-[data-baseweb="tooltip"], [data-baseweb="tooltip"] > div,
-[role="tooltip"], [role="tooltip"] > div {
-    background: var(--surface-3) !important;
-    color: var(--ink) !important;
-    border-color: var(--line-strong) !important;
-}
-[data-baseweb="tooltip"] *, [role="tooltip"] * {
-    background-color: transparent !important; color: var(--ink) !important;
-}
-
-/* Input shells. Streamlit's dark base gives these a dark inner surface and a
-   shadow to match, and the shadow survives a background override — it is what
-   read as a black seam down the right edge of the capital field once the
-   stepper beside it was removed. */
-.stDateInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
-.stTextInput [data-baseweb="input"], .stSelectbox [data-baseweb="select"] > div {
-    box-shadow: none !important;
-}
-.stDateInput [data-baseweb="input"] *, .stNumberInput [data-baseweb="input"] * {
-    background-color: transparent !important;
-}
-
-/* Segmented controls and body copy. */
-[data-testid="stButtonGroup"] button { color: var(--ink-tertiary) !important; }
-[data-testid="stButtonGroup"] button[data-testid$="Active"] { color: var(--ink) !important; }
-[data-testid="stMain"], [data-testid="stSidebar"] { color: var(--ink); }
-.stMarkdown, .stMarkdown p, .stMarkdown li { color: var(--ink-secondary); }
+.stDateInput [data-baseweb="input"] { background: var(--surface-1) !important; }
 """
 
 # Chart-theming constants below are read by Plotly, which cannot see CSS
@@ -297,8 +213,16 @@ _CHART_THEME = {
 
 
 def _active_theme() -> str:
-    """The active theme name — dark unless the appearance control has set light."""
-    return str(st.session_state.get("theme", "dark"))
+    """The active theme name — the product default unless a session says otherwise.
+
+    app.py writes ``st.session_state["theme"]`` on every run before anything is
+    styled, so the fallback is reached only by callers with no session at all
+    (the headless render tests, a REPL). It still has to agree with
+    ``APPEARANCES[0]`` in app.py: a fallback that disagrees with the product
+    default is a second default, and the first thing it would do is hand a
+    chart the wrong palette.
+    """
+    return str(st.session_state.get("theme", "light"))
 
 
 def _chart_theme() -> dict:
