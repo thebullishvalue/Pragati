@@ -172,8 +172,12 @@ LIGHT_TOKENS = """
 [data-baseweb="popover"] > div,
 [data-baseweb="popover"] ul,
 [data-baseweb="popover"] [data-baseweb="menu"] { background: var(--surface-1) !important; }
-[data-testid^="stBaseButton"] { background: var(--surface-1) !important; }
-[data-testid^="stBaseButton"]:hover { background: var(--surface-2) !important; }
+/* `:not(...)` on both, because `^=` is a PREFIX match — without it these two
+   also claim stBaseButton-primary, and being appended after theme.css they
+   beat its accent fill at equal specificity. That is what painted Run Analysis
+   white-on-white in Paper. */
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]) { background: var(--surface-1) !important; }
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]):hover { background: var(--surface-2) !important; }
 /* Fields read as wells in both, but by opposite means: darker than the panel
    on graphite (--bg), and white against a rail tinted --surface-2 on paper. */
 .stSelectbox [data-baseweb="select"] > div,

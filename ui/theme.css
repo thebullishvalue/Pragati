@@ -1946,8 +1946,8 @@
    is the button itself. Both selectors are listed: the descendant form is
    the one that works, the child form is kept harmless in case a future
    Streamlit flattens the wrapper. */
-[data-testid^="stBaseButton"],
-.stButton > button, .stDownloadButton > button {
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]),
+.stButton > button:not([kind="primary"]), .stDownloadButton > button {
     background: var(--surface-2); color: var(--ink-secondary);
     border: 1px solid var(--line-strong); border-radius: var(--r-md);
     font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 600;
@@ -1957,8 +1957,8 @@
     transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease),
                 color var(--fast) var(--ease);
 }
-[data-testid^="stBaseButton"]:hover,
-.stButton > button:hover, .stDownloadButton > button:hover {
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]):hover,
+.stButton > button:not([kind="primary"]):hover, .stDownloadButton > button:hover {
     background: var(--surface-3); color: var(--ink); border-color: var(--line-strong);
 }
 [data-testid="stBaseButton-primary"],
@@ -2957,14 +2957,34 @@
 
 /* Colour and border only. The FACE of a button is elevation, and elevation is
    already stated for graphite further up this file — see the note in
-   LIGHT_TOKENS on why it cannot be one token. */
-[data-testid^="stBaseButton"] {
+   LIGHT_TOKENS on why it cannot be one token.
+
+   `^=` IS A PREFIX MATCH, so `stBaseButton` also selects
+   `stBaseButton-primary` — the two rules are not siblings, one contains the
+   other. That held only while both lived in one block with the primary stated
+   last. The moment these moved here and the paper override stayed behind in
+   LIGHT_TOKENS, the generic rule was appended AFTER the specific one at equal
+   specificity and won: Run Analysis lost its accent fill and kept its white
+   label, so Paper drew a white button with an invisible word on it.
+   `:not()` makes the exclusion structural instead of positional — the generic
+   rule no longer matches the primary at all, in any order, in either file. */
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]) {
     color: var(--ink-secondary) !important;
     border-color: var(--line-strong) !important;
 }
-[data-testid^="stBaseButton"]:hover { color: var(--ink) !important; }
+[data-testid^="stBaseButton"]:not([data-testid="stBaseButton-primary"]):hover { color: var(--ink) !important; }
+/* The hover has to be restated at the same weight. The rest state above is
+   `!important` (it has to outrank Streamlit's own button theming), and an
+   `!important` declaration beats a non-important one whatever its specificity
+   — so this rule silently disabled the plain `:hover { background: #3D6BDC }`
+   in the base block and froze the primary button on Slate. Weight is not a
+   dial you turn up on one state and leave alone on the others. */
 [data-testid="stBaseButton-primary"] {
     background: var(--accent) !important; color: #FFFFFF !important;
+}
+[data-testid="stBaseButton-primary"]:hover {
+    background: #3D6BDC !important; border-color: #3D6BDC !important;
+    color: #FFFFFF !important;
 }
 
 /* Inputs, their text, and — the easiest one to miss — their placeholders. */
