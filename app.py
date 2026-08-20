@@ -143,14 +143,23 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-#: The two appearances. Both are reading surfaces — Slate is the dark one you
-#: work on, Paper the light one you read a result on and print from.
+#: The two appearances. Both are reading surfaces — Paper is the light one you
+#: read a result on and print from, Slate the dark one you work on.
 #:
-#: SLATE LEADS, and the order is the default: `theme_choice()` falls back to
+#: PAPER LEADS, and the order is the default: `theme_choice()` falls back to
 #: APPEARANCES[0] for any unset or unrecognised value, so first-in-tuple IS
 #: first-run. Kept as one fact rather than a separate DEFAULT_ constant, so the
 #: toggle's left-to-right order and the default can never disagree.
-APPEARANCES = ("Slate", "Paper")
+#:
+#: Two other places track this and must be flipped with it — both are asserted
+#: by the audit in theme.py's docstring rather than left to memory:
+#:   * `.streamlit/config.toml` sets the colour of the FIRST PAINT, before this
+#:     app's stylesheet arrives. Pointing it at the other ramp ships a flash of
+#:     the wrong theme on every cold load.
+#:   * `ui.theme._active_theme()` falls back for callers that reach the palette
+#:     without a session (the headless render tests), and a fallback that
+#:     disagrees with the product default is a second default.
+APPEARANCES = ("Paper", "Slate")
 _THEME_CHOICE = "theme_choice"
 
 
@@ -468,10 +477,14 @@ def _render_landing_page() -> None:
     """Cold start — a description of the product, built from the product's own parts.
 
     Every block here uses the same components the analysis pages use: a section
-    header for each division, `render_kpi_strip` for the coverage numbers, and
-    `panel()` for each system. The claim leads, because a reader who has not
-    run anything needs to know what the thing IS before they are shown what it
-    covers.
+    header for each division, `panel()` for each engine, and `render_kpi_strip`
+    for the scope numbers.
+
+    The order is an argument, and it runs from the thing to its bounds to its
+    product: the claim, then ENGINES (what the system is made of), then INPUTS
+    & SCOPE (the bounds those engines run under), then RUN OUTPUTS (what comes
+    back). Scope led once, which put the answer to "over what?" in front of any
+    reason to ask it.
     """
     # THE CLAIM SAYS WHAT THE PRODUCT DOES.
     #
@@ -501,28 +514,17 @@ def _render_landing_page() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Coverage — the app's own KPI grammar, not a bespoke number row ─────
-    render_section_header("Coverage", "Styles, estimation window and position cap · "
-                          "fixed before any run", icon="layers", accent="accent")
-    render_kpi_strip(
-        [
-            {"label": "Portfolio Styles", "value": str(len(STYLE_LABELS)),
-             "subtext": " · ".join(str(METHOD_SPECS[k]["short"]) for k in METHOD_ORDER)
-                        + " — every one travels the identical pipeline"},
-            {"label": "Estimation Window", "value": f"{_CALIBRATION_LOOKBACK_FILES}d",
-             "subtext": "Daily observations behind the covariance, over a universe that "
-                        "must carry 80% of it to be estimated"},
-            {"label": "Position Cap", "value": "10%",
-             "subtext": "Per holding, relaxed only where it and full allocation are not "
-                        "simultaneously satisfiable"},
-        ],
-        max_cols=3,
-        key="landing-coverage",
-    )
-
-    # ── The three systems, as panels ──────────────────────────────────────
-    render_section_header("Systems", "Three subsystems, one pipeline · every style "
-                          "travels all of it", icon="cpu", accent="violet")
+    # ── Engines — what the thing is, before what it is bounded by ─────────
+    # This section leads. The reader has just been told what the system does;
+    # the next thing they need is what it is MADE of, not the numbers those
+    # parts are bounded by. Scope answers a question — "over what?" — that
+    # only exists once you know there is machinery to scope.
+    #
+    # Accent, not violet: every page in the app gives its LEAD section the
+    # primary accent (see "Positions", "Relative Performance"), and the lead
+    # here changed.
+    render_section_header("Engines", "Three engines, one pipeline · every style "
+                          "travels all of it", icon="cpu", accent="accent")
     cols = st.columns(3, gap="small")
     for col, (cls, name, kicker, body, specs) in zip(cols, _SYSTEM_PANELS):
         with col:
@@ -539,8 +541,30 @@ def _render_landing_page() -> None:
                     unsafe_allow_html=True,
                 )
 
-    # ── What a run returns ────────────────────────────────────────────────
-    render_section_header("What a Run Returns", "Four outputs, on the page rather "
+    # ── Inputs & Scope — the app's own KPI grammar, not a bespoke number row
+    #    Second, because these are the bounds ON the engines above: what they
+    #    can be pointed at, how much history they read, and how far any one
+    #    holding is allowed to go.
+    render_section_header("Inputs & Scope", "Styles, estimation window and position "
+                          "cap · fixed before any run", icon="layers", accent="violet")
+    render_kpi_strip(
+        [
+            {"label": "Portfolio Styles", "value": str(len(STYLE_LABELS)),
+             "subtext": " · ".join(str(METHOD_SPECS[k]["short"]) for k in METHOD_ORDER)
+                        + " — every one travels the identical pipeline"},
+            {"label": "Estimation Window", "value": f"{_CALIBRATION_LOOKBACK_FILES}d",
+             "subtext": "Daily observations behind the covariance, over a universe that "
+                        "must carry 80% of it to be estimated"},
+            {"label": "Position Cap", "value": "10%",
+             "subtext": "Per holding, relaxed only where it and full allocation are not "
+                        "simultaneously satisfiable"},
+        ],
+        max_cols=3,
+        key="landing-coverage",   # key is CSS-visible (st-key-kpi-*); name is not
+    )
+
+    # ── Run Outputs — the close of the argument ───────────────────────────
+    render_section_header("Run Outputs", "What a run hands back, on the page rather "
                           "than in a log", icon="target", accent="emerald")
     _out = (
         ("A curated book", "Holdings, units and value, with the weight formula that "
